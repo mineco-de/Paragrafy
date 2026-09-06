@@ -45,7 +45,7 @@ Built for agencies, SaaS operators, and anyone who maintains legal pages for mor
 |---|---|
 | ![Paragrafy editor with language tabs and HTML view](https://paragrafy.cloud/assets/paragrafy-editor.webp) | ![Paragrafy settings with cron endpoints](https://paragrafy.cloud/assets/paragrafy-settings.webp) |
 
-👉 Try it live: **[demo.paragrafy.cloud](https://demo.paragrafy.cloud)** (freely configurable, resets every 10 minutes).
+👉 Try it live: **[demo.paragrafy.cloud](https://demo.paragrafy.cloud)** (no username, password 12345678 - freely configurable, resets every 10 minutes).
 
 ---
 
