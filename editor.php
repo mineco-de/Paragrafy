@@ -34,6 +34,8 @@ if (!user_can_access_project($db, (int)$doc['project_id'])) {
     exit;
 }
 
+require_csrf();
+
 $stmtAll = $db->prepare("SELECT lang, title, content, updated_at, scheduled_at FROM translations WHERE document_id = ?");
 $stmtAll->execute([$docId]);
 $allTranslations = [];
@@ -79,7 +81,7 @@ if (isset($_POST['action']) && $_POST['action'] === 'deepl_translate') {
     echo json_encode([
         'success' => true,
         'title' => $translatedTitle,
-        'content' => $resContent['text']
+        'content' => sanitize_legal_html($resContent['text'])
     ]);
     exit;
 }
@@ -95,7 +97,7 @@ if (isset($_POST['action']) && $_POST['action'] === 'ai_import') {
     $sourceType = $_POST['source_type'] ?? '';
     if ($sourceType === 'url') {
         $rawResult = fetch_raw_legal_text(trim($_POST['source_url'] ?? ''), 'url');
-    } elseif ($sourceType === 'file' && !empty($_FILES['import_file']['tmp_name'])) {
+    } elseif ($sourceType === 'file' && !empty($_FILES['import_file']) && ($_FILES['import_file']['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_OK) {
         $rawResult = fetch_raw_legal_text($_FILES['import_file']['tmp_name'], 'file');
     } else {
         $rawResult = ['success' => false, 'error' => t('db.ai_import.empty_content')];
@@ -114,7 +116,7 @@ if (isset($_POST['action']) && $_POST['action'] === 'ai_import') {
 
     echo json_encode([
         'success' => true,
-        'content' => $importResult['content'],
+        'content' => sanitize_legal_html($importResult['content']),
         'fields' => $importResult['fields']
     ]);
     exit;
@@ -139,8 +141,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'save_translation') {
         $title = trim($_POST['title'] ?? '');
         $slug = trim($_POST['slug'] ?? '');
-        $content = $_POST['content'] ?? '';
-        $status = $_POST['status'] ?? 'published';
+        $content = sanitize_legal_html($_POST['content'] ?? '');
+        $status = in_array($_POST['status'] ?? '', ['published', 'draft', 'scheduled'], true) ? $_POST['status'] : 'published';
         $changeNote = trim($_POST['change_note'] ?? '');
         $scheduledAt = !empty($_POST['scheduled_at']) ? str_replace('T', ' ', trim($_POST['scheduled_at'])) . ':00' : null;
         
@@ -214,7 +216,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             log_audit((int)$doc['project_id'], $doc['project_name'], t('editor.audit.saved', ['title' => $title, 'lang' => strtoupper($targetLang), 'status' => $statusLabel]));
         }
 
-        header("Location: /admin?project_id=" . ((int)$_POST['project_id']) . "&msg=saved");
+        header("Location: /admin?project_id=" . ((int)$doc['project_id']) . "&msg=saved");
         exit;
     }
 
@@ -428,7 +430,7 @@ $isStandardDocType = find_reference_template_for_slug($doc['default_slug']) !== 
                 <input type="text" value="<?= htmlspecialchars($sourceTrans['title']) ?>" readonly disabled style="width:100%">
 
                 <label><?= htmlspecialchars(t('editor.reference_content_label')) ?></label>
-                <div class="source-box" id="sourceContentBox"><?= $sourceTrans['content'] ?></div>
+                <div class="source-box" id="sourceContentBox"><?= sanitize_legal_html($sourceTrans['content'] ?? '') ?></div>
                 <div class="diff-box" id="diffViewerBox"></div>
 
                 <div class="stat-footer">
@@ -446,6 +448,7 @@ $isStandardDocType = find_reference_template_for_slug($doc['default_slug']) !== 
 
             <div class="pane">
                 <form id="editForm" method="post" action="/admin/edit?doc_id=<?= $docId ?>&lang=<?= $targetLang ?>&ref_lang=<?= $sourceLang ?>" onsubmit="prepareSubmit()">
+                    <?= csrf_field() ?>
                     <input type="hidden" name="action" value="save_translation">
                     <input type="hidden" name="project_id" value="<?= $doc['project_id'] ?>">
                     <textarea name="content" id="finalContentInput" style="display:none;"><?= htmlspecialchars($displayContent) ?></textarea>
@@ -497,7 +500,7 @@ $isStandardDocType = find_reference_template_for_slug($doc['default_slug']) !== 
                         <button type="button" class="tool-btn wide" id="toggleCodeBtn" onclick="toggleCodeView()" title="<?= htmlspecialchars(t('editor.toolbar.html_title')) ?>"><?= t('editor.toolbar.html_code_label') ?></button>
                     </div>
 
-                    <div id="visualEditor" class="editor-box" contenteditable="true" oninput="updateWordCounts()"><?= $displayContent ?></div>
+                    <div id="visualEditor" class="editor-box" contenteditable="true" oninput="updateWordCounts()"><?= sanitize_legal_html($displayContent) ?></div>
                     <textarea id="rawCodeEditor" class="code-textarea" oninput="updateWordCounts()"><?= htmlspecialchars($displayContent) ?></textarea>
 
                     <div class="stat-footer">
@@ -555,6 +558,7 @@ $isStandardDocType = find_reference_template_for_slug($doc['default_slug']) !== 
                             <div style="display:flex;gap:6px;flex-shrink:0">
                                 <button type="button" class="pg-btn-secondary" style="padding:5px 10px;font-size:11.5px" onclick="toggleVersionDiff(<?= $v['id'] ?>)"><?= htmlspecialchars(t('editor.diff_button')) ?></button>
                                 <form method="post" onsubmit="return confirm('<?= htmlspecialchars(t('editor.confirm_restore'), ENT_QUOTES) ?>');" style="margin:0">
+                                    <?= csrf_field() ?>
                                     <input type="hidden" name="action" value="restore_version">
                                     <input type="hidden" name="version_id" value="<?= $v['id'] ?>">
                                     <button type="submit" class="pg-btn-secondary" style="padding:5px 10px;font-size:11.5px"><?= htmlspecialchars(t('editor.restore_button')) ?></button>
@@ -624,6 +628,7 @@ $isStandardDocType = find_reference_template_for_slug($doc['default_slug']) !== 
         let formDirty = false;
         const currentSourceLang = "<?= $sourceLang ?>";
         const currentTargetLang = "<?= $targetLang ?>";
+        const CSRF_TOKEN = <?= json_encode(csrf_token()) ?>;
         const i18n = {
             urlPrompt: <?= json_encode(t('editor.js.url_prompt')) ?>,
             visualEditorLabel: <?= json_encode(t('editor.toolbar.visual_editor_label')) ?>,
@@ -861,6 +866,7 @@ $isStandardDocType = find_reference_template_for_slug($doc['default_slug']) !== 
 
             const formData = new FormData();
             formData.append('action', 'deepl_translate');
+            formData.append('csrf_token', CSRF_TOKEN);
             formData.append('source_lang', currentSourceLang);
             formData.append('target_lang', currentTargetLang);
             formData.append('content', sourceRaw);
@@ -927,6 +933,7 @@ $isStandardDocType = find_reference_template_for_slug($doc['default_slug']) !== 
 
             const formData = new FormData();
             formData.append('action', 'ai_import');
+            formData.append('csrf_token', CSRF_TOKEN);
             if (file) {
                 formData.append('source_type', 'file');
                 formData.append('import_file', file);
@@ -990,6 +997,7 @@ $isStandardDocType = find_reference_template_for_slug($doc['default_slug']) !== 
                 };
                 const formData = new FormData();
                 formData.append('action', 'ai_import_apply_fields');
+                formData.append('csrf_token', CSRF_TOKEN);
                 Object.keys(fields).forEach(k => formData.append('fields[' + k + ']', fields[k]));
                 try {
                     await fetch(window.location.href, { method: 'POST', body: formData });

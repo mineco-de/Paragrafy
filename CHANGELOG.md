@@ -8,6 +8,52 @@ Die Versionsnummer folgt **CalVer** (`JAHR.MONAT.BUILD`) statt SemVer:
 jeden Monat wieder bei `1`. Änderungen vor `2026.9.1` sind nicht rückwirkend
 erfasst — siehe dafür die Git-Historie.
 
+## [2026.9.11] - 2026-09-08
+
+### Security
+Vollständiges Security-Audit von Core (siehe `SECURITY.md`-artige Aufstellung im Audit-Report)
+mit direkter Umsetzung aller Kritisch/Hoch/Mittel/Niedrig-Funde:
+
+- **Breaking Change (Docker, self-hosted):** `PARAGRAFY_DATA_DIR` liegt im Container jetzt unter
+  `/var/www/data`, außerhalb des Apache-Docroots `/var/www/html` (vorher
+  `/var/www/html/data` — web-erreichbar, falls eine vorgeschaltete vhost-Härtung fehlt oder
+  fehlkonfiguriert ist; ein Forensik-Fund vom 2026-09-07 auf einem fremden, unabhängigen
+  System auf demselben Server hat das konkret aufgezeigt). Der Host-seitige `./data`-Ordner
+  bleibt unverändert — ein normales `git pull` + `docker compose up -d --build` genügt, keine
+  manuelle Datenmigration nötig. Zusätzlich: `Options Indexes` (Directory-Listing) im
+  Docker-Image entfernt, neue `.htaccess`-Deny-Regeln für `*.sqlite*`/`config.php`/`.env*` als
+  zusätzliches Sicherheitsnetz für bare-metal-Installationen.
+- **SSRF-Schutz für Webhook-Ziel-URLs**: Webhook-URLs (Test-Button, Warteschlange) werden jetzt
+  gegen private/interne IP-Ranges geprüft (`is_public_http_url()`, bisher nur beim
+  KI-Einlesemodus genutzt) — verhindert, dass ein Projekt-Webhook auf `localhost`,
+  `169.254.169.254` (Cloud-Metadata) oder interne Hosts zeigen kann.
+- **HTML-Sanitizing für Rechtstext-Inhalte**: Der WYSIWYG-Editor-Content, KI-Import- und
+  DeepL-Übersetzungsergebnisse durchlaufen jetzt eine Allowlist-HTML-Bereinigung
+  (`sanitize_legal_html()`) statt ungefiltert gespeichert/ausgegeben zu werden — schließt eine
+  Stored-XSS-Lücke, die auf eingebetteten Kundenseiten ausgenutzt werden konnte.
+- **Backup-Download/-Restore und weitere instanzweite Aktionen** (Voll-Instanz-Backup,
+  Cron-Secret-Rotation, Webhook-Queue, Dokumenttyp-Verwaltung) sind jetzt ausschließlich dem
+  primären Admin-Login vorbehalten, nicht mehr jedem eingeladenen Multi-User.
+- **CSRF-Schutz** für alle zustandsändernden Formulare/AJAX-Aufrufe in `admin.php`/`editor.php`.
+- **Session-Härtung**: `Secure`/`HttpOnly`/`SameSite`-Cookie-Flags, `session_regenerate_id()`
+  nach jedem Login-Weg (Passwort, Einladung, Passwort-Reset, SSO).
+- **Login-Rate-Limiting** jetzt zusätzlich pro Account (nicht mehr nur pro IP); neues generisches
+  Rate-Limiting für den Consent-Log-Endpunkt und die öffentliche JSON-API.
+- **Consent-Log-Endpunkt**: Format-Validierung von `consentId`/`textHash`.
+- **SMTP-Header-Injection**: CR/LF-Bereinigung von Empfänger/Absender/Projektname vor dem
+  Einbetten in Mail-Header/SMTP-Kommandos.
+- **CSV-Injection**: Formel-Escaping (`=+-@`) in den Audit-Log- und Consent-Nachweis-CSV-Exporten.
+- **Projekt-Backup-Export** enthält keine Klartext-Secrets (SMTP-Passwort, Webhook-Secret,
+  KI-/DeepL-API-Keys) mehr.
+- Instanzweite Audit-Log-Einträge sind für eingeschränkte Multi-User nicht mehr sichtbar.
+- Einladungs- und Passwort-Reset-Links laufen jetzt ab (7 Tage bzw. 1 Stunde).
+- Race-Condition-Schutz (Lock) bei der Erstinstallation; generische Fehlermeldungen statt
+  Klartext-Exceptions bei Installationsfehlern.
+- `display_errors` wird jetzt in allen Einstiegspunkten explizit deaktiviert.
+- Kleinere Härtungen: IPv4-mapped-IPv6 bei der Consent-IP-Anonymisierung, striktere
+  Passwort-Mindestlänge (10 Zeichen) und Domain-Validierung im Setup-Wizard, konsistente
+  Prepared Statements.
+
 ## [2026.9.10] - 2026-09-05
 
 ### Added

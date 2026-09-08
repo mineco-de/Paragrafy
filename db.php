@@ -6,7 +6,7 @@ declare(strict_types=1);
 
 // CalVer: JAHR.MONAT.BUILD - BUILD zaehlt Releases innerhalb des Monats hoch (startet bei 1).
 // Siehe CHANGELOG.md fuer die Aenderungen je Version.
-define('PARAGRAFY_VERSION', '2026.9.10');
+define('PARAGRAFY_VERSION', '2026.9.11');
 define('PARAGRAFY_DIR', __DIR__);
 // Where persistent data (DB, config, backups, .env) lives. Defaults to the
 // code directory (bare-metal installs); set PARAGRAFY_DATA_DIR to point this
@@ -177,6 +177,9 @@ function ensure_schema_migrations(PDO $pdo): void {
             }
             if (!in_array('notes', $userColNames)) {
                 $pdo->exec("ALTER TABLE users ADD COLUMN notes TEXT DEFAULT ''");
+            }
+            if (!in_array('invite_token_expires_at', $userColNames)) {
+                $pdo->exec("ALTER TABLE users ADD COLUMN invite_token_expires_at DATETIME DEFAULT NULL");
             }
         }
 
@@ -407,7 +410,8 @@ function init_database_schema(PDO $pdo): void {
             invited_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             activated_at DATETIME DEFAULT NULL,
             locale TEXT DEFAULT 'de',
-            notes TEXT DEFAULT ''
+            notes TEXT DEFAULT '',
+            invite_token_expires_at DATETIME DEFAULT NULL
         );
 
         CREATE TABLE IF NOT EXISTS user_projects (
@@ -578,6 +582,95 @@ function svg_icon(string $name, string $extraClass = '', int $size = 16): string
 
 function help_icon(string $text): string {
     return '<span class="pg-help" tabindex="0" title="' . htmlspecialchars($text, ENT_QUOTES) . '">?</span>';
+}
+
+/**
+ * Allowlist HTML sanitizer for legal-text content coming from the WYSIWYG
+ * editor, the AI import (BETA) and DeepL translation results. Content saved
+ * here is later embedded verbatim into customer sites (index.php) and shown
+ * raw in editor.php's preview panes, so it must never carry executable
+ * markup (script/style/iframe/on*-handlers/javascript: URLs) -- but it does
+ * need to stay real HTML (headings, lists, links, tables), so htmlspecialchars()
+ * would be wrong here. Disallowed-but-harmless wrapper tags are unwrapped
+ * (their content survives as plain text/inline markup); disallowed tags that
+ * only make sense as executable/embedded content are dropped entirely.
+ */
+function sanitize_legal_html(string $html): string {
+    if (trim($html) === '') {
+        return '';
+    }
+
+    $allowedTags = [
+        'p' => [], 'br' => [], 'strong' => [], 'b' => [], 'em' => [], 'i' => [], 'u' => [],
+        'h1' => [], 'h2' => [], 'h3' => [], 'h4' => [], 'h5' => [], 'h6' => [],
+        'ul' => [], 'ol' => [], 'li' => [],
+        'a' => ['href', 'target', 'rel'],
+        'table' => [], 'thead' => [], 'tbody' => [], 'tr' => [], 'td' => [], 'th' => [],
+        'span' => ['class'], 'div' => ['class'],
+    ];
+    $dropEntirely = ['script', 'style', 'iframe', 'object', 'embed', 'noscript', 'svg', 'math', 'link', 'meta', 'base', 'form', 'input', 'button', 'textarea', 'select', 'option'];
+
+    $prevErrors = libxml_use_internal_errors(true);
+    $doc = new DOMDocument('1.0', 'UTF-8');
+    $doc->loadHTML('<?xml encoding="UTF-8"?><html><body>' . $html . '</body></html>', LIBXML_NOERROR | LIBXML_NOWARNING);
+    libxml_clear_errors();
+    libxml_use_internal_errors($prevErrors);
+
+    $body = $doc->getElementsByTagName('body')->item(0);
+    if (!$body) {
+        return '';
+    }
+    sanitize_html_node($body, $allowedTags, $dropEntirely);
+
+    $out = '';
+    foreach (iterator_to_array($body->childNodes) as $child) {
+        $out .= $doc->saveHTML($child);
+    }
+    return $out;
+}
+
+function sanitize_html_node(DOMNode $node, array $allowedTags, array $dropEntirely): void {
+    foreach (iterator_to_array($node->childNodes) as $child) {
+        if ($child instanceof DOMText) {
+            continue;
+        }
+        if (!($child instanceof DOMElement)) {
+            // Comments, processing instructions, doctypes etc. -- never legitimate in saved content.
+            $node->removeChild($child);
+            continue;
+        }
+        $tag = strtolower($child->nodeName);
+        if (in_array($tag, $dropEntirely, true)) {
+            $node->removeChild($child);
+            continue;
+        }
+        if (!isset($allowedTags[$tag])) {
+            // Unwrap: keep the (sanitized) children, drop just this wrapper tag.
+            sanitize_html_node($child, $allowedTags, $dropEntirely);
+            while ($child->firstChild) {
+                $node->insertBefore($child->firstChild, $child);
+            }
+            $node->removeChild($child);
+            continue;
+        }
+
+        $allowedAttrs = $allowedTags[$tag];
+        foreach (iterator_to_array($child->attributes ?? []) as $attr) {
+            $attrName = strtolower($attr->nodeName);
+            if (!in_array($attrName, $allowedAttrs, true)) {
+                $child->removeAttribute($attr->nodeName);
+                continue;
+            }
+            if (in_array($attrName, ['href', 'src'], true) && preg_match('/^\s*(javascript|data|vbscript):/i', $attr->nodeValue)) {
+                $child->removeAttribute($attr->nodeName);
+            }
+        }
+        if ($tag === 'a') {
+            $child->setAttribute('rel', 'noopener noreferrer nofollow');
+        }
+
+        sanitize_html_node($child, $allowedTags, $dropEntirely);
+    }
 }
 
 function replace_placeholders(string $content, array $project): string {
@@ -943,12 +1036,19 @@ function update_project_company_fields(PDO $db, int $projectId, array $fields): 
 }
 
 function send_smtp_mail(array $project, string $to, string $subject, string $bodyHtml): array {
+    $to = strip_header_injection($to);
+    if (!filter_var($to, FILTER_VALIDATE_EMAIL)) {
+        return ['success' => false, 'error' => t('db.smtp.recipient_rejected', ['response' => 'invalid recipient'])];
+    }
+    $subject = strip_header_injection($subject);
+    $projectName = strip_header_injection((string)($project['name'] ?? ''));
+
     $host = trim($project['smtp_host'] ?? '');
     $port = (int)($project['smtp_port'] ?? 587);
     $user = trim($project['smtp_user'] ?? '');
     $pass = trim($project['smtp_pass'] ?? '');
     $secure = strtolower(trim($project['smtp_secure'] ?? 'tls'));
-    $from = trim($project['smtp_from'] ?? '') ?: ($project['email'] ?? 'noreply@' . $project['domain']);
+    $from = strip_header_injection(trim($project['smtp_from'] ?? '') ?: ($project['email'] ?? 'noreply@' . $project['domain']));
 
     if (empty($host)) {
         $headers = "MIME-Version: 1.0\r\nContent-Type: text/html; charset=UTF-8\r\nFrom: " . $from;
@@ -1017,7 +1117,7 @@ function send_smtp_mail(array $project, string $to, string $subject, string $bod
     $read();
 
     $headers = [
-        "From: " . $project['name'] . " <$from>",
+        "From: " . $projectName . " <$from>",
         "To: <$to>",
         "Subject: =?UTF-8?B?" . base64_encode($subject) . "?=",
         "MIME-Version: 1.0",
@@ -1147,7 +1247,7 @@ function send_webhook_http(string $url, string $payload, string $eventName, stri
 function dispatch_webhook(array $project, array $eventData): array {
     $built = build_webhook_payload($project, $eventData);
 
-    if (empty($built['url']) || !filter_var($built['url'], FILTER_VALIDATE_URL)) {
+    if (empty($built['url']) || !is_public_http_url($built['url'])) {
         return ['success' => false, 'error' => t('db.webhook.no_url_configured')];
     }
 
@@ -1184,7 +1284,7 @@ function dispatch_webhook(array $project, array $eventData): array {
 function enqueue_webhook(array $project, array $eventData): void {
     try {
         $built = build_webhook_payload($project, $eventData);
-        if (empty($built['url']) || !filter_var($built['url'], FILTER_VALIDATE_URL)) {
+        if (empty($built['url']) || !is_public_http_url($built['url'])) {
             return;
         }
         $db = get_db();
@@ -1229,7 +1329,7 @@ function process_webhook_queue(int $limit = 20): array {
             $project = $projStmt->fetch();
 
             $url = trim($project['webhook_url'] ?? '');
-            if (!$project || empty($url) || !filter_var($url, FILTER_VALIDATE_URL)) {
+            if (!$project || empty($url) || !is_public_http_url($url)) {
                 $upd = $db->prepare("UPDATE webhook_queue SET status = 'failed', last_error = ? WHERE id = ?");
                 $upd->execute([t('db.webhook.no_url_configured_queue'), $row['id']]);
                 $failed++;
@@ -1498,6 +1598,48 @@ function user_can_access_project(PDO $db, int $projectId): bool {
     return in_array($projectId, current_user_accessible_project_ids($db), true);
 }
 
+/** Returns (and lazily creates) this session's CSRF token. */
+function csrf_token(): string {
+    if (empty($_SESSION['csrf_token'])) {
+        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+    }
+    return $_SESSION['csrf_token'];
+}
+
+/** Hidden form field carrying the current session's CSRF token. */
+function csrf_field(): string {
+    return '<input type="hidden" name="csrf_token" value="' . htmlspecialchars(csrf_token(), ENT_QUOTES) . '">';
+}
+
+/**
+ * Call at the top of any POST-handling section (after the auth/session gate)
+ * to reject state-changing requests without a valid CSRF token. Accepts the
+ * token either as a POST field (regular forms, FormData-based AJAX) or as the
+ * X-CSRF-Token header (fetch calls that don't submit FormData).
+ */
+function require_csrf(): void {
+    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+        return;
+    }
+    $given = (string)($_POST['csrf_token'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '');
+    if ($given === '' || !hash_equals(csrf_token(), $given)) {
+        http_response_code(403);
+        echo htmlspecialchars(t('admin.common.access_denied'));
+        exit;
+    }
+}
+
+/** Strips CR/LF from a value before it is embedded in a mail/SMTP header, preventing header/command injection. */
+function strip_header_injection(string $v): string {
+    return trim(preg_replace('/[\r\n]+/', ' ', $v));
+}
+
+/** Escapes a CSV cell against formula/CSV injection (Excel etc. treat a leading =+-@ as a formula). */
+function csv_safe(?string $v): string {
+    $v = (string)$v;
+    return preg_match('/^[=+\-@]/', $v) ? "'" . $v : $v;
+}
+
 function log_audit(?int $projectId, string $projectName, string $action): void {
     try {
         $db = get_db();
@@ -1525,6 +1667,12 @@ function record_translation_version(PDO $db, int $documentId, string $lang, stri
  * given time) without storing personal data. Unparseable input returns ''.
  */
 function anonymize_ip(string $ip): string {
+    // IPv4-mapped IPv6 (e.g. "::ffff:203.0.113.5", seen behind some proxies) would otherwise
+    // fall through to the IPv6 branch below and get zeroed past its embedded IPv4 bytes --
+    // unmask it first so it's anonymized the same way a plain IPv4 address would be.
+    if (str_starts_with($ip, '::ffff:') && filter_var(substr($ip, 7), FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+        $ip = substr($ip, 7);
+    }
     if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
         $parts = explode('.', $ip);
         if (count($parts) === 4) {
@@ -1588,15 +1736,25 @@ function get_client_ip(): string {
 
 /** Seconds to wait, or 0 if login attempts are currently allowed. */
 function login_rate_limit_wait(PDO $db, string $identifier): int {
+    return rate_limit_wait($db, $identifier, LOGIN_MAX_ATTEMPTS, LOGIN_WINDOW_MINUTES);
+}
+
+/**
+ * Generic reusable rate limiter built on the same login_attempts table as the
+ * admin login throttle (identifier is a free-form string, so callers just
+ * pick a distinct prefix, e.g. "consent:{project_id}:{ip}" or "api:{ip}").
+ * Seconds to wait, or 0 if a request is currently allowed.
+ */
+function rate_limit_wait(PDO $db, string $identifier, int $maxAttempts, int $windowMinutes): int {
     try {
         $stmt = $db->prepare("SELECT created_at FROM login_attempts WHERE identifier = ? AND created_at >= datetime('now', ?) ORDER BY created_at ASC");
-        $stmt->execute([$identifier, '-' . LOGIN_WINDOW_MINUTES . ' minutes']);
+        $stmt->execute([$identifier, '-' . $windowMinutes . ' minutes']);
         $rows = $stmt->fetchAll();
-        if (count($rows) < LOGIN_MAX_ATTEMPTS) {
+        if (count($rows) < $maxAttempts) {
             return 0;
         }
         $oldest = strtotime($rows[0]['created_at']);
-        $waitUntil = $oldest + (LOGIN_WINDOW_MINUTES * 60);
+        $waitUntil = $oldest + ($windowMinutes * 60);
         $remaining = $waitUntil - time();
         return max(0, $remaining);
     } catch (Throwable $e) {
@@ -1892,6 +2050,15 @@ function export_project_backup(PDO $db, int $projectId): array {
             $pdo->prepare("INSERT INTO $table (" . implode(',', $cols) . ") VALUES ($placeholders)")->execute(array_values($row));
         };
 
+        // Secrets nie in eine herunterladbare Export-Datei schreiben -- der Export kann per Mail/
+        // Cloud-Speicher/USB-Stick geteilt werden, weit ausserhalb des durch Admin-Login
+        // geschuetzten Kontexts. Muessen nach einem Re-Import in den Projekteinstellungen neu
+        // gesetzt werden.
+        foreach (['smtp_pass', 'webhook_secret', 'ai_api_key', 'deepl_api_key'] as $secretCol) {
+            if (array_key_exists($secretCol, $projectRow)) {
+                $projectRow[$secretCol] = '';
+            }
+        }
         $insertRow($exportPdo, 'projects', $projectRow);
         foreach ($docTypeRows as $row) $insertRow($exportPdo, 'doc_types', $row);
         foreach ($documentRows as $row) $insertRow($exportPdo, 'documents', $row);

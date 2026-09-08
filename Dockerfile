@@ -17,7 +17,7 @@ RUN a2enmod rewrite
 # inherited defaults.
 RUN { \
     echo '<Directory /var/www/html/>'; \
-    echo '    Options Indexes FollowSymLinks'; \
+    echo '    Options FollowSymLinks'; \
     echo '    AllowOverride All'; \
     echo '    Require all granted'; \
     echo '</Directory>'; \
@@ -35,14 +35,22 @@ WORKDIR /var/www/html
 # (in particular: local data/, .git/, and any local .env files).
 COPY . /var/www/html/
 
-RUN chown -R www-data:www-data /var/www/html \
+# Persistent data (DB, config.php, backups, .env) lives OUTSIDE the web-served
+# /var/www/html docroot -- a security-incident forensics review on 2026-09-07
+# found that self-hosted setups which mount their data volume inside the
+# docroot (as this project's own docker-compose.yaml did before this fix)
+# leave DB/config/.env reachable over HTTP the moment any vhost/.htaccess
+# protection in front of the container is missing or misconfigured. Placing
+# it next to (not inside) the docroot means there's nothing to serve even in
+# that failure case.
+RUN mkdir -p /var/www/data \
+    && chown -R www-data:www-data /var/www/html /var/www/data \
     && find /var/www/html -type d -exec chmod 755 {} + \
     && find /var/www/html -type f -exec chmod 644 {} + \
-    && chmod +x /var/www/html/docker-entrypoint.sh
+    && chmod +x /var/www/html/docker-entrypoint.sh \
+    && chmod 750 /var/www/data
 
-# Persistent data (DB, config.php, backups, .env) lives outside the code tree
-# so it survives image rebuilds -- see PARAGRAFY_DATA_DIR in docker-compose.yaml.
-ENV PARAGRAFY_DATA_DIR=/var/www/html/data
+ENV PARAGRAFY_DATA_DIR=/var/www/data
 
 ENTRYPOINT ["/var/www/html/docker-entrypoint.sh"]
 CMD ["apache2-foreground"]

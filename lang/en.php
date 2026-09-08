@@ -10,9 +10,12 @@ return [
     // ---------------------------------------------------------------
     // install.php - Setup wizard
     // ---------------------------------------------------------------
-    'install.error.password_too_short' => 'The admin password must be at least 6 characters long.',
+    'install.error.password_too_short' => 'The admin password must be at least 10 characters long.',
     'install.error.missing_fields' => 'Please provide a project name and domain.',
+    'install.error.invalid_domain' => 'The domain contains invalid characters.',
+    'install.error.install_in_progress' => 'An installation is already in progress. Please wait a moment and reload the page.',
     'install.error.install_failed' => 'Installation failed: :message',
+    'install.error.generic_detail' => 'Please check the server logs or try again.',
 
     'install.page_title' => 'Paragrafy Setup & Installation',
     'install.heading' => 'Paragrafy Setup',
@@ -340,6 +343,7 @@ return [
     'admin.no_access.body' => 'No project is currently enabled for your account. Please contact your administrator.',
 
     'admin.common.access_denied' => 'Access denied.',
+    'admin.common.secret_already_set' => '•••••••• (set – re-enter to change)',
 
     'admin.audit.col_project' => 'Project',
     'admin.common.backup_not_found' => 'Backup not found.',

@@ -10,6 +10,10 @@ services:
     volumes:
       # Persistiert SQLite-Datenbank, config.php, Backups und .env.local auf dem Host.
       # Ohne dieses Volume gehen Datenbank & Zugangsdaten bei jedem Rebuild verloren!
-      - ./data:/var/www/html/data
+      # Seit 2026-09: Container-Pfad liegt bewusst AUSSERHALB von /var/www/html (dem
+      # Apache-Docroot) -- vorher waeren DB/config.php/.env bei fehlender vhost-Haertung
+      # direkt ueber HTTP erreichbar gewesen. Der Host-Pfad ./data bleibt unveraendert,
+      # bestehende Installationen muessen hier nichts umziehen.
+      - ./data:/var/www/data
     environment:
-      - PARAGRAFY_DATA_DIR=/var/www/html/data
+      - PARAGRAFY_DATA_DIR=/var/www/data

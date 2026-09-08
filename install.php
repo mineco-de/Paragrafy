@@ -3,6 +3,9 @@
  * Paragrafy - Interactive Setup & Installation Wizard
  */
 declare(strict_types=1);
+ini_set('display_errors', '0');
+ini_set('log_errors', '1');
+error_reporting(E_ALL);
 
 require_once __DIR__ . '/db.php';
 
@@ -40,11 +43,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $customSlugs = $_POST['custom_slug'] ?? [];
     $customRequired = $_POST['custom_required'] ?? [];
 
-    if (strlen($adminPass) < 6) {
+    if (strlen($adminPass) < 10) {
         $error = t('install.error.password_too_short');
     } elseif (empty($projectName) || empty($projectDomain)) {
         $error = t('install.error.missing_fields');
+    } elseif (!preg_match('/^[a-z0-9.-]+$/i', $projectDomain)) {
+        $error = t('install.error.invalid_domain');
     } else {
+        $lockFile = PARAGRAFY_DATA_DIR . '/.install.lock';
+        $lockHandle = fopen($lockFile, 'c');
+        if (!$lockHandle || !flock($lockHandle, LOCK_EX | LOCK_NB)) {
+            $error = t('install.error.install_in_progress');
+        } elseif (is_installed()) {
+            // Eine parallele Anfrage hat die Installation zwischenzeitlich bereits
+            // abgeschlossen -- sauber abbrechen statt ein zweites Projekt/config.php anzulegen.
+            flock($lockHandle, LOCK_UN);
+            header('Location: /admin');
+            exit;
+        } else {
         try {
             $pdo = get_db();
             init_database_schema($pdo);
@@ -144,13 +160,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             if (session_status() === PHP_SESSION_NONE) {
+                $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
+                session_set_cookie_params(['lifetime' => 0, 'path' => '/', 'secure' => $isHttps, 'httponly' => true, 'samesite' => 'Lax']);
                 session_start();
             }
+            session_regenerate_id(true);
             $_SESSION['paragrafy_admin'] = true;
+            flock($lockHandle, LOCK_UN);
             header('Location: /admin');
             exit;
         } catch (Throwable $e) {
-            $error = t('install.error.install_failed', ['message' => $e->getMessage()]);
+            error_log('Paragrafy install failed: ' . $e->getMessage());
+            $error = t('install.error.install_failed', ['message' => t('install.error.generic_detail')]);
+        }
+        flock($lockHandle, LOCK_UN);
         }
     }
 }

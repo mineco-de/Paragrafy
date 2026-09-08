@@ -3,9 +3,14 @@
  * Paragrafy - Public Router, Document Viewer, Embed Drawer, JSON API & Cron Audit
  */
 declare(strict_types=1);
+ini_set('display_errors', '0');
+ini_set('log_errors', '1');
+error_reporting(E_ALL);
 
 require_once __DIR__ . '/db.php';
 if (session_status() === PHP_SESSION_NONE) {
+    $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
+    session_set_cookie_params(['lifetime' => 0, 'path' => '/', 'secure' => $isHttps, 'httponly' => true, 'samesite' => 'Lax']);
     session_start();
 }
 
@@ -109,6 +114,13 @@ if (!empty($parts) && end($parts) === 'preview') {
 
 // JSON API Endpoint (/api/de/impressum oder /api/impressum)
 if (!empty($parts) && $parts[0] === 'api') {
+    if (rate_limit_wait($db, 'api:' . get_client_ip(), 120, 5) > 0) {
+        http_response_code(429);
+        header('Content-Type: application/json');
+        echo json_encode(['error' => 'rate_limited']);
+        exit;
+    }
+    record_login_failure($db, 'api:' . get_client_ip());
     handle_json_api($parts, $project, $db, $primaryLang, $isPreview);
     exit;
 }
@@ -173,7 +185,7 @@ $stmt = $db->prepare("
 $stmt->execute([$trans['document_id']]);
 $languages = $stmt->fetchAll();
 
-$content = replace_placeholders($previewContent, $project);
+$content = replace_placeholders(sanitize_legal_html($previewContent), $project);
 render_public_document($project, $trans, $content, $languages, $lang, $isPreview, $liveSlug);
 
 function get_i18n_strings(string $lang): array {
@@ -349,6 +361,20 @@ function handle_consent_log(?array $project, PDO $db): void {
     $lang = substr(trim((string)($body['lang'] ?? '')), 0, 20);
     $textHash = substr(trim((string)($body['textHash'] ?? '')), 0, 64);
 
+    if (!preg_match('/^[A-Za-z0-9\-]{1,100}$/', $consentId) || !preg_match('/^[a-f0-9]{64}$/', $textHash)) {
+        http_response_code(400);
+        echo json_encode(['success' => false]);
+        return;
+    }
+
+    $rateIdentifier = 'consent:' . $project['id'] . ':' . get_client_ip();
+    if (rate_limit_wait($db, $rateIdentifier, 30, 15) > 0) {
+        http_response_code(429);
+        echo json_encode(['success' => false]);
+        return;
+    }
+    record_login_failure($db, $rateIdentifier);
+
     log_consent(
         $db,
         (int)$project['id'],
@@ -416,7 +442,7 @@ function handle_json_api(array $parts, array $project, PDO $db, string $primaryL
         $doc['content'] = $doc['scheduled_content'] !== '' ? $doc['scheduled_content'] : $doc['content'];
     }
 
-    $doc['rendered_html'] = replace_placeholders($doc['content'], $project);
+    $doc['rendered_html'] = replace_placeholders(sanitize_legal_html($doc['content']), $project);
     $response = [
         'project' => $project['name'],
         'title' => $doc['title'],

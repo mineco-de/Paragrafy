@@ -3,8 +3,13 @@
  * Paragrafy - Admin Command Center, Multi-Project Manager, Compliance Engine & Webhook Logger
  */
 declare(strict_types=1);
+ini_set('display_errors', '0');
+ini_set('log_errors', '1');
+error_reporting(E_ALL);
 
 if (session_status() === PHP_SESSION_NONE) {
+    $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
+    session_set_cookie_params(['lifetime' => 0, 'path' => '/', 'secure' => $isHttps, 'httponly' => true, 'samesite' => 'Lax']);
     session_start();
 }
 require_once __DIR__ . '/db.php';
@@ -41,12 +46,17 @@ if (str_starts_with($earlyRoute, '/admin/sso')) {
 
 if (isset($_POST['action']) && $_POST['action'] === 'login') {
     $clientIp = get_client_ip();
-    $waitSeconds = login_rate_limit_wait($db, $clientIp);
+    $emailForRateLimit = trim(strtolower($_POST['email'] ?? ''));
+    $acctIdentifier = $emailForRateLimit !== '' ? 'acct:' . $emailForRateLimit : null;
+    $waitSeconds = max(
+        login_rate_limit_wait($db, $clientIp),
+        $acctIdentifier !== null ? login_rate_limit_wait($db, $acctIdentifier) : 0
+    );
 
     if ($waitSeconds > 0) {
         $error = t('admin.login.rate_limited', ['minutes' => (int)ceil($waitSeconds / 60)]);
     } else {
-        $email = trim(strtolower($_POST['email'] ?? ''));
+        $email = $emailForRateLimit;
         $pass = $_POST['password'] ?? '';
         $loggedIn = false;
 
@@ -55,6 +65,7 @@ if (isset($_POST['action']) && $_POST['action'] === 'login') {
             $stmt->execute([$email]);
             $user = $stmt->fetch();
             if ($user && !empty($user['password_hash']) && password_verify($pass, $user['password_hash'])) {
+                session_regenerate_id(true);
                 $_SESSION['paragrafy_admin'] = true;
                 $_SESSION['paragrafy_user_id'] = (int)$user['id'];
                 $_SESSION['paragrafy_user_name'] = $user['name'];
@@ -63,6 +74,7 @@ if (isset($_POST['action']) && $_POST['action'] === 'login') {
                 $loggedIn = true;
             }
         } elseif (password_verify($pass, $config['admin_password_hash'] ?? '')) {
+            session_regenerate_id(true);
             $_SESSION['paragrafy_admin'] = true;
             $_SESSION['paragrafy_user_name'] = 'Admin';
             unset($_SESSION['paragrafy_user_id'], $_SESSION['paragrafy_user_email'], $_SESSION['paragrafy_user_locale']);
@@ -71,10 +83,16 @@ if (isset($_POST['action']) && $_POST['action'] === 'login') {
 
         if ($loggedIn) {
             clear_login_failures($db, $clientIp);
+            if ($acctIdentifier !== null) {
+                clear_login_failures($db, $acctIdentifier);
+            }
             header('Location: /admin');
             exit;
         }
         record_login_failure($db, $clientIp);
+        if ($acctIdentifier !== null) {
+            record_login_failure($db, $acctIdentifier);
+        }
         $error = t('admin.login.invalid_credentials');
     }
 }
@@ -89,6 +107,8 @@ if (empty($_SESSION['paragrafy_admin'])) {
     render_login_view($error);
     exit;
 }
+
+require_csrf();
 
 $allProjects = $db->query("SELECT * FROM projects ORDER BY name ASC")->fetchAll();
 $accessibleProjectIds = current_user_accessible_project_ids($db);
@@ -113,6 +133,16 @@ $project = $stmt->fetch();
 
 if (!$project) {
     render_no_access_view();
+    exit;
+}
+
+// Diese Aktionen wirken auf die gesamte Instanz (alle Projekte/Mandanten), nicht nur auf das
+// aktuell gewaehlte Projekt -- nur der primaere Admin-Login darf sie ausloesen, sonst koennte ein
+// auf ein einzelnes Projekt beschraenkter Multi-User Daten anderer Mandanten abziehen/ueberschreiben.
+$instanceWideAction = ($_GET['action'] ?? $_POST['action'] ?? '');
+if (in_array($instanceWideAction, ['download_backup', 'download_backup_file', 'run_backup_now', 'restore_backup_upload', 'run_webhook_queue_now', 'regenerate_cron_secret'], true) && !current_user_is_primary_admin()) {
+    http_response_code(403);
+    echo htmlspecialchars(t('admin.common.access_denied'));
     exit;
 }
 
@@ -268,7 +298,11 @@ if (isset($_GET['action']) && $_GET['action'] === 'export_markdown') {
 
 // 2b. Änderungsprotokoll als CSV herunterladen
 if (isset($_GET['action']) && $_GET['action'] === 'export_audit_csv') {
-    $stmt = $db->prepare("SELECT * FROM audit_log WHERE project_id = ? OR project_id IS NULL ORDER BY created_at DESC LIMIT 1000");
+    if (current_user_is_primary_admin()) {
+        $stmt = $db->prepare("SELECT * FROM audit_log WHERE project_id = ? OR project_id IS NULL ORDER BY created_at DESC LIMIT 1000");
+    } else {
+        $stmt = $db->prepare("SELECT * FROM audit_log WHERE project_id = ? ORDER BY created_at DESC LIMIT 1000");
+    }
     $stmt->execute([$projectId]);
     $entries = $stmt->fetchAll();
 
@@ -278,7 +312,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'export_audit_csv') {
     fputs($out, "\xEF\xBB\xBF");
     fputcsv($out, [t('admin.audit.col_time'), t('admin.audit.col_user'), t('admin.audit.col_action'), t('admin.audit.col_project')]);
     foreach ($entries as $e) {
-        fputcsv($out, [$e['created_at'], $e['user_name'], $e['action'], $e['project_name']]);
+        fputcsv($out, [csv_safe($e['created_at']), csv_safe($e['user_name']), csv_safe($e['action']), csv_safe($e['project_name'])]);
     }
     fclose($out);
     exit;
@@ -300,7 +334,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'export_consent_log_csv') {
     ]);
     foreach ($entries as $e) {
         $actionLabel = $e['action'] === 'accepted' ? t('admin.consent_log.action_accepted') : t('admin.consent_log.action_declined');
-        fputcsv($out, [$e['created_at'], $e['consent_id'], $actionLabel, $e['lang'], $e['ip_anonymized'], $e['banner_text_hash'], $e['user_agent']]);
+        fputcsv($out, [csv_safe($e['created_at']), csv_safe($e['consent_id']), $actionLabel, csv_safe($e['lang']), csv_safe($e['ip_anonymized']), csv_safe($e['banner_text_hash']), csv_safe($e['user_agent'])]);
     }
     fclose($out);
     exit;
@@ -404,6 +438,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
+    // Dokumenttypen sind instanzweit (gelten fuer alle Projekte/Mandanten) -- nur der primaere
+    // Admin darf sie anlegen/aendern/loeschen, sonst koennte ein auf ein Projekt beschraenkter
+    // Multi-User die Dokumentstruktur aller anderen Mandanten manipulieren.
+    if (in_array($action, ['toggle_required', 'create_doc_type', 'delete_doc_type'], true) && !current_user_is_primary_admin()) {
+        http_response_code(403);
+        echo htmlspecialchars(t('admin.common.access_denied'));
+        exit;
+    }
+
     // AJAX / Post Toggle für Pflichtstatus
     if ($action === 'toggle_required') {
         $typeId = (int)$_POST['doc_type_id'];
@@ -424,18 +467,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'save_project') {
         $activeLangs = implode(',', array_filter(array_map('trim', explode(',', $_POST['active_languages'] ?? 'de,en'))));
         $brandColor = trim($_POST['brand_color'] ?? '#F0A63C');
-        $deeplKey = trim($_POST['deepl_api_key'] ?? '');
+        // Secret-Felder werden im Formular nie mit ihrem echten Wert vorbefuellt (siehe Rendering
+        // weiter unten) -- ein leer abgeschicktes Feld heisst also "unveraendert lassen", nicht
+        // "loeschen", sonst wuerde jedes Speichern ohne Neueingabe die Secrets wegloeschen.
+        $deeplKey = trim($_POST['deepl_api_key'] ?? '') ?: (string)($project['deepl_api_key'] ?? '');
         $aiProvider = in_array($_POST['ai_provider'] ?? '', ['claude', 'openai'], true) ? $_POST['ai_provider'] : '';
-        $aiApiKey = trim($_POST['ai_api_key'] ?? '');
+        $aiApiKey = trim($_POST['ai_api_key'] ?? '') ?: (string)($project['ai_api_key'] ?? '');
         $logoUrl = trim($_POST['logo_url'] ?? '');
         $webhookUrl = trim($_POST['webhook_url'] ?? '');
-        $webhookSecret = trim($_POST['webhook_secret'] ?? '');
+        $webhookSecret = trim($_POST['webhook_secret'] ?? '') ?: (string)($project['webhook_secret'] ?? '');
         $auditMonths = max(1, (int)($_POST['audit_interval_months'] ?? 12));
-        
+
         $smtpHost = trim($_POST['smtp_host'] ?? '');
         $smtpPort = (int)($_POST['smtp_port'] ?? 587);
         $smtpUser = trim($_POST['smtp_user'] ?? '');
-        $smtpPass = trim($_POST['smtp_pass'] ?? '');
+        $smtpPass = trim($_POST['smtp_pass'] ?? '') ?: (string)($project['smtp_pass'] ?? '');
         $smtpSecure = trim($_POST['smtp_secure'] ?? 'tls');
         $smtpFrom = trim($_POST['smtp_from'] ?? '');
         $auditRecipient = trim($_POST['audit_email_recipient'] ?? '');
@@ -500,7 +546,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if ($action === 'delete_doc_type') {
         $typeId = (int)$_POST['doc_type_id'];
-        $typeTitle = (string)($db->query("SELECT title FROM doc_types WHERE id = " . (int)$typeId)->fetchColumn() ?: '');
+        $typeTitleStmt = $db->prepare("SELECT title FROM doc_types WHERE id = ?");
+        $typeTitleStmt->execute([$typeId]);
+        $typeTitle = (string)($typeTitleStmt->fetchColumn() ?: '');
         $stmt = $db->prepare("DELETE FROM doc_types WHERE id = ?");
         $stmt->execute([$typeId]);
         log_audit(null, '', t('admin.matrix.audit.doctype_deleted', ['title' => $typeTitle]));
@@ -538,8 +586,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         $token = bin2hex(random_bytes(32));
-        $ins = $db->prepare("INSERT INTO users (name, email, status, invite_token) VALUES (?, ?, 'invited', ?)");
-        $ins->execute([$name, $email, $token]);
+        $expiresAt = date('Y-m-d H:i:s', strtotime('+7 days'));
+        $ins = $db->prepare("INSERT INTO users (name, email, status, invite_token, invite_token_expires_at) VALUES (?, ?, 'invited', ?, ?)");
+        $ins->execute([$name, $email, $token, $expiresAt]);
         log_audit(null, '', t('admin.users.audit.invited', ['name' => $name, 'email' => $email]));
 
         $res = send_invite_mail($project, $name, $email, $token);
@@ -556,8 +605,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if ($u) {
             $token = bin2hex(random_bytes(32));
-            $upd = $db->prepare("UPDATE users SET invite_token = ? WHERE id = ?");
-            $upd->execute([$token, $uid]);
+            $expiresAt = date('Y-m-d H:i:s', strtotime('+7 days'));
+            $upd = $db->prepare("UPDATE users SET invite_token = ?, invite_token_expires_at = ? WHERE id = ?");
+            $upd->execute([$token, $expiresAt, $uid]);
             $res = send_invite_mail($project, $u['name'], $u['email'], $token);
             header("Location: /admin/users?msg=" . ($res['success'] ? 'invited' : 'invite_mail_failed'));
             exit;
@@ -570,7 +620,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'delete_user') {
         $uid = (int)($_POST['user_id'] ?? 0);
         if ($uid !== (int)($_SESSION['paragrafy_user_id'] ?? 0)) {
-            $delUserName = (string)($db->query("SELECT name FROM users WHERE id = " . (int)$uid)->fetchColumn() ?: '');
+            $delUserNameStmt = $db->prepare("SELECT name FROM users WHERE id = ?");
+            $delUserNameStmt->execute([$uid]);
+            $delUserName = (string)($delUserNameStmt->fetchColumn() ?: '');
             $del = $db->prepare("DELETE FROM users WHERE id = ?");
             $del->execute([$uid]);
             log_audit(null, '', t('admin.users.audit.deleted', ['name' => $delUserName]));
@@ -620,7 +672,7 @@ function send_invite_mail(array $project, string $name, string $email, string $t
 
 function handle_accept_invite(PDO $db): void {
     $token = trim($_GET['token'] ?? $_POST['token'] ?? '');
-    $stmt = $db->prepare("SELECT * FROM users WHERE invite_token = ? AND status = 'invited'");
+    $stmt = $db->prepare("SELECT * FROM users WHERE invite_token = ? AND invite_token != '' AND status = 'invited' AND (invite_token_expires_at IS NULL OR invite_token_expires_at > CURRENT_TIMESTAMP)");
     $stmt->execute([$token]);
     $user = $stmt->fetch();
 
@@ -636,6 +688,7 @@ function handle_accept_invite(PDO $db): void {
             $upd = $db->prepare("UPDATE users SET password_hash = ?, status = 'active', invite_token = '', activated_at = CURRENT_TIMESTAMP WHERE id = ?");
             $upd->execute([password_hash($pass, PASSWORD_DEFAULT), $user['id']]);
 
+            session_regenerate_id(true);
             $_SESSION['paragrafy_admin'] = true;
             $_SESSION['paragrafy_user_id'] = (int)$user['id'];
             $_SESSION['paragrafy_user_name'] = $user['name'];
@@ -706,8 +759,9 @@ function handle_forgot_password(PDO $db): void {
 
             if ($user) {
                 $token = bin2hex(random_bytes(32));
-                $upd = $db->prepare("UPDATE users SET invite_token = ? WHERE id = ?");
-                $upd->execute([$token, $user['id']]);
+                $expiresAt = date('Y-m-d H:i:s', strtotime('+1 hour'));
+                $upd = $db->prepare("UPDATE users SET invite_token = ?, invite_token_expires_at = ? WHERE id = ?");
+                $upd->execute([$token, $expiresAt, $user['id']]);
 
                 $project = $db->query("SELECT * FROM projects ORDER BY id ASC LIMIT 1")->fetch();
                 if ($project) {
@@ -777,7 +831,7 @@ function render_forgot_password_view(bool $sent): void {
 
 function handle_reset_password(PDO $db): void {
     $token = trim($_GET['token'] ?? $_POST['token'] ?? '');
-    $stmt = $db->prepare("SELECT * FROM users WHERE invite_token = ? AND status = 'active'");
+    $stmt = $db->prepare("SELECT * FROM users WHERE invite_token = ? AND invite_token != '' AND status = 'active' AND (invite_token_expires_at IS NULL OR invite_token_expires_at > CURRENT_TIMESTAMP)");
     $stmt->execute([$token]);
     $user = $stmt->fetch();
 
@@ -794,6 +848,7 @@ function handle_reset_password(PDO $db): void {
             $upd->execute([password_hash($pass, PASSWORD_DEFAULT), $user['id']]);
             log_audit(null, '', t('admin.login.reset.audit_note', ['name' => $user['name']]));
 
+            session_regenerate_id(true);
             $_SESSION['paragrafy_admin'] = true;
             $_SESSION['paragrafy_user_id'] = (int)$user['id'];
             $_SESSION['paragrafy_user_name'] = $user['name'];
@@ -891,6 +946,7 @@ function handle_sso_login(array $config): void {
         return;
     }
 
+    session_regenerate_id(true);
     $_SESSION['paragrafy_admin'] = true;
     $_SESSION['paragrafy_user_name'] = 'Admin';
     unset($_SESSION['paragrafy_user_id'], $_SESSION['paragrafy_user_email']);
@@ -1250,6 +1306,7 @@ function render_matrix_view(PDO $db, array $project, array $projects): void {
                                                 </a>
                                                 <?php if (!in_array($type['slug'], ['impressum', 'privacy'])): ?>
                                                     <form method="post" onsubmit="return confirm('<?= htmlspecialchars(t('admin.matrix.table.confirm_delete_doctype'), ENT_QUOTES) ?>');" style="margin:0;">
+                                                        <?= csrf_field() ?>
                                                         <input type="hidden" name="action" value="delete_doc_type">
                                                         <input type="hidden" name="doc_type_id" value="<?= $type['id'] ?>">
                                                         <button type="submit" class="pg-icon-btn danger" title="<?= htmlspecialchars(t('admin.matrix.table.delete_title')) ?>">
@@ -1270,6 +1327,7 @@ function render_matrix_view(PDO $db, array $project, array $projects): void {
                         <h2><?= htmlspecialchars(t('admin.matrix.add.heading')) ?></h2>
                         <p class="pg-card-sub" style="margin-bottom:14px"><?= htmlspecialchars(t('admin.matrix.add.subtitle')) ?></p>
                         <form method="post">
+                            <?= csrf_field() ?>
                             <input type="hidden" name="action" value="create_doc_type">
                             <div class="grid-add">
                                 <input type="text" name="doc_title" placeholder="<?= htmlspecialchars(t('admin.matrix.add.title_placeholder')) ?>" required>
@@ -1294,6 +1352,7 @@ function render_matrix_view(PDO $db, array $project, array $projects): void {
                 <p style="font-size:13px;color:var(--text-muted);margin:0 0 20px"><?= htmlspecialchars(t('admin.matrix.new_project_modal.desc')) ?></p>
 
                 <form method="post">
+                    <?= csrf_field() ?>
                     <input type="hidden" name="action" value="create_project">
 
                     <label class="pg-label" style="margin-top:0"><?= htmlspecialchars(t('admin.matrix.new_project_modal.name_label')) ?></label>
@@ -1331,6 +1390,7 @@ function render_matrix_view(PDO $db, array $project, array $projects): void {
         </div>
 
         <script>
+            const CSRF_TOKEN = <?= json_encode(csrf_token()) ?>;
             const i18n = {
                 copyFailed: <?= json_encode(t('admin.matrix.js.copy_failed')) ?>,
                 markedRequired: <?= json_encode(t('admin.matrix.js.marked_required')) ?>,
@@ -1388,6 +1448,7 @@ function render_matrix_view(PDO $db, array $project, array $projects): void {
                 const fd = new FormData();
                 fd.append('action', 'toggle_required');
                 fd.append('doc_type_id', id);
+                fd.append('csrf_token', CSRF_TOKEN);
 
                 try {
                     const res = await fetch(window.location.href, {
@@ -1496,6 +1557,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                             <p style="font-size:12px;color:var(--green);margin:0 0 12px"><?= htmlspecialchars(t('admin.settings.locale.saved_msg')) ?></p>
                         <?php endif; ?>
                         <form method="post" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+                            <?= csrf_field() ?>
                             <input type="hidden" name="action" value="save_locale">
                             <label class="pg-label" style="margin:0"><?= htmlspecialchars(t('admin.settings.locale.label')) ?></label>
                             <select name="locale">
@@ -1543,6 +1605,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                             </div>
 
                             <form method="post" onsubmit="return confirm('<?= htmlspecialchars(t('admin.settings.automation.confirm_regenerate'), ENT_QUOTES) ?>');">
+                                <?= csrf_field() ?>
                                 <input type="hidden" name="action" value="regenerate_cron_secret">
                                 <button type="submit" class="pg-btn-secondary"><?= htmlspecialchars(t('admin.settings.automation.regenerate_button')) ?></button>
                             </form>
@@ -1552,6 +1615,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                     <div class="pg-card pg-card-pad">
                         <h2 style="margin-bottom:18px"><?= t('admin.settings.project.heading') ?></h2>
                         <form method="post">
+                            <?= csrf_field() ?>
                             <input type="hidden" name="action" value="save_project">
 
                             <div class="grid">
@@ -1608,13 +1672,13 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                             <input type="hidden" name="smtp_host" value="<?= htmlspecialchars($project['smtp_host'] ?? '') ?>">
                             <input type="hidden" name="smtp_port" value="<?= htmlspecialchars((string)($project['smtp_port'] ?? 587)) ?>">
                             <input type="hidden" name="smtp_user" value="<?= htmlspecialchars($project['smtp_user'] ?? '') ?>">
-                            <input type="hidden" name="smtp_pass" value="<?= htmlspecialchars($project['smtp_pass'] ?? '') ?>">
+                            <input type="hidden" name="smtp_pass" value="">
                             <input type="hidden" name="smtp_secure" value="<?= htmlspecialchars($project['smtp_secure'] ?? 'tls') ?>">
                             <input type="hidden" name="smtp_from" value="<?= htmlspecialchars($project['smtp_from'] ?? '') ?>">
                             <input type="hidden" name="audit_email_recipient" value="<?= htmlspecialchars($project['audit_email_recipient'] ?? '') ?>">
                             <input type="hidden" name="webhook_url" value="<?= htmlspecialchars($project['webhook_url'] ?? '') ?>">
-                            <input type="hidden" name="webhook_secret" value="<?= htmlspecialchars($project['webhook_secret'] ?? '') ?>">
-                            <input type="hidden" name="deepl_api_key" value="<?= htmlspecialchars($project['deepl_api_key'] ?? '') ?>">
+                            <input type="hidden" name="webhook_secret" value="">
+                            <input type="hidden" name="deepl_api_key" value="">
                             <input type="hidden" name="company_name" value="<?= htmlspecialchars($project['company_name'] ?? '') ?>">
                             <input type="hidden" name="representative" value="<?= htmlspecialchars($project['representative'] ?? '') ?>">
                             <input type="hidden" name="address" value="<?= htmlspecialchars($project['address'] ?? '') ?>">
@@ -1632,6 +1696,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                         <h2><?= htmlspecialchars(t('admin.settings.cookie.heading')) ?></h2>
                         <p class="pg-card-sub" style="margin-bottom:16px"><?= t('admin.settings.cookie.subtitle') ?></p>
                         <form method="post">
+                            <?= csrf_field() ?>
                             <input type="hidden" name="action" value="save_project">
                             <input type="hidden" name="name" value="<?= htmlspecialchars($project['name']) ?>">
                             <input type="hidden" name="domain" value="<?= htmlspecialchars($project['domain']) ?>">
@@ -1643,13 +1708,13 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                             <input type="hidden" name="smtp_host" value="<?= htmlspecialchars($project['smtp_host'] ?? '') ?>">
                             <input type="hidden" name="smtp_port" value="<?= htmlspecialchars((string)($project['smtp_port'] ?? 587)) ?>">
                             <input type="hidden" name="smtp_user" value="<?= htmlspecialchars($project['smtp_user'] ?? '') ?>">
-                            <input type="hidden" name="smtp_pass" value="<?= htmlspecialchars($project['smtp_pass'] ?? '') ?>">
+                            <input type="hidden" name="smtp_pass" value="">
                             <input type="hidden" name="smtp_secure" value="<?= htmlspecialchars($project['smtp_secure'] ?? 'tls') ?>">
                             <input type="hidden" name="smtp_from" value="<?= htmlspecialchars($project['smtp_from'] ?? '') ?>">
                             <input type="hidden" name="audit_email_recipient" value="<?= htmlspecialchars($project['audit_email_recipient'] ?? '') ?>">
                             <input type="hidden" name="webhook_url" value="<?= htmlspecialchars($project['webhook_url'] ?? '') ?>">
-                            <input type="hidden" name="webhook_secret" value="<?= htmlspecialchars($project['webhook_secret'] ?? '') ?>">
-                            <input type="hidden" name="deepl_api_key" value="<?= htmlspecialchars($project['deepl_api_key'] ?? '') ?>">
+                            <input type="hidden" name="webhook_secret" value="">
+                            <input type="hidden" name="deepl_api_key" value="">
                             <input type="hidden" name="company_name" value="<?= htmlspecialchars($project['company_name'] ?? '') ?>">
                             <input type="hidden" name="representative" value="<?= htmlspecialchars($project['representative'] ?? '') ?>">
                             <input type="hidden" name="address" value="<?= htmlspecialchars($project['address'] ?? '') ?>">
@@ -1677,6 +1742,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                         <h2><?= htmlspecialchars(t('admin.settings.consent_log.heading')) ?></h2>
                         <p class="pg-card-sub" style="margin-bottom:16px"><?= t('admin.settings.consent_log.subtitle') ?></p>
                         <form method="post">
+                            <?= csrf_field() ?>
                             <input type="hidden" name="action" value="save_project">
                             <input type="hidden" name="name" value="<?= htmlspecialchars($project['name']) ?>">
                             <input type="hidden" name="domain" value="<?= htmlspecialchars($project['domain']) ?>">
@@ -1690,13 +1756,13 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                             <input type="hidden" name="smtp_host" value="<?= htmlspecialchars($project['smtp_host'] ?? '') ?>">
                             <input type="hidden" name="smtp_port" value="<?= htmlspecialchars((string)($project['smtp_port'] ?? 587)) ?>">
                             <input type="hidden" name="smtp_user" value="<?= htmlspecialchars($project['smtp_user'] ?? '') ?>">
-                            <input type="hidden" name="smtp_pass" value="<?= htmlspecialchars($project['smtp_pass'] ?? '') ?>">
+                            <input type="hidden" name="smtp_pass" value="">
                             <input type="hidden" name="smtp_secure" value="<?= htmlspecialchars($project['smtp_secure'] ?? 'tls') ?>">
                             <input type="hidden" name="smtp_from" value="<?= htmlspecialchars($project['smtp_from'] ?? '') ?>">
                             <input type="hidden" name="audit_email_recipient" value="<?= htmlspecialchars($project['audit_email_recipient'] ?? '') ?>">
                             <input type="hidden" name="webhook_url" value="<?= htmlspecialchars($project['webhook_url'] ?? '') ?>">
-                            <input type="hidden" name="webhook_secret" value="<?= htmlspecialchars($project['webhook_secret'] ?? '') ?>">
-                            <input type="hidden" name="deepl_api_key" value="<?= htmlspecialchars($project['deepl_api_key'] ?? '') ?>">
+                            <input type="hidden" name="webhook_secret" value="">
+                            <input type="hidden" name="deepl_api_key" value="">
                             <input type="hidden" name="company_name" value="<?= htmlspecialchars($project['company_name'] ?? '') ?>">
                             <input type="hidden" name="representative" value="<?= htmlspecialchars($project['representative'] ?? '') ?>">
                             <input type="hidden" name="address" value="<?= htmlspecialchars($project['address'] ?? '') ?>">
@@ -1726,6 +1792,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                         <h2><?= htmlspecialchars(t('admin.settings.email.heading')) ?></h2>
                         <p class="pg-card-sub" style="margin-bottom:16px"><?= htmlspecialchars(t('admin.settings.email.subtitle')) ?></p>
                         <form method="post">
+                            <?= csrf_field() ?>
                             <input type="hidden" name="action" value="save_project">
                             <input type="hidden" name="name" value="<?= htmlspecialchars($project['name']) ?>">
                             <input type="hidden" name="domain" value="<?= htmlspecialchars($project['domain']) ?>">
@@ -1739,8 +1806,8 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                             <input type="hidden" name="consent_logging_enabled" value="<?= !empty($project['consent_logging_enabled']) ? '1' : '0' ?>">
                             <input type="hidden" name="consent_log_retention_days" value="<?= htmlspecialchars((string)($project['consent_log_retention_days'] ?? 1095)) ?>">
                             <input type="hidden" name="webhook_url" value="<?= htmlspecialchars($project['webhook_url'] ?? '') ?>">
-                            <input type="hidden" name="webhook_secret" value="<?= htmlspecialchars($project['webhook_secret'] ?? '') ?>">
-                            <input type="hidden" name="deepl_api_key" value="<?= htmlspecialchars($project['deepl_api_key'] ?? '') ?>">
+                            <input type="hidden" name="webhook_secret" value="">
+                            <input type="hidden" name="deepl_api_key" value="">
                             <input type="hidden" name="company_name" value="<?= htmlspecialchars($project['company_name'] ?? '') ?>">
                             <input type="hidden" name="representative" value="<?= htmlspecialchars($project['representative'] ?? '') ?>">
                             <input type="hidden" name="address" value="<?= htmlspecialchars($project['address'] ?? '') ?>">
@@ -1773,7 +1840,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                                 </div>
                                 <div>
                                     <label class="pg-label"><?= htmlspecialchars(t('admin.settings.email.password_label')) ?></label>
-                                    <input type="password" name="smtp_pass" value="<?= htmlspecialchars($project['smtp_pass'] ?? '') ?>" placeholder="<?= htmlspecialchars(t('admin.settings.email.password_placeholder')) ?>" style="width:100%">
+                                    <input type="password" name="smtp_pass" value="" placeholder="<?= htmlspecialchars(!empty($project['smtp_pass']) ? t('admin.common.secret_already_set') : t('admin.settings.email.password_placeholder')) ?>" autocomplete="new-password" style="width:100%">
                                 </div>
                             </div>
 
@@ -1801,6 +1868,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                         <h2><?= htmlspecialchars(t('admin.settings.webhooks.heading')) ?></h2>
                         <p class="pg-card-sub" style="margin-bottom:16px"><?= htmlspecialchars(t('admin.settings.webhooks.subtitle')) ?></p>
                         <form method="post">
+                            <?= csrf_field() ?>
                             <input type="hidden" name="action" value="save_project">
                             <input type="hidden" name="name" value="<?= htmlspecialchars($project['name']) ?>">
                             <input type="hidden" name="domain" value="<?= htmlspecialchars($project['domain']) ?>">
@@ -1816,7 +1884,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                             <input type="hidden" name="smtp_host" value="<?= htmlspecialchars($project['smtp_host'] ?? '') ?>">
                             <input type="hidden" name="smtp_port" value="<?= htmlspecialchars((string)($project['smtp_port'] ?? 587)) ?>">
                             <input type="hidden" name="smtp_user" value="<?= htmlspecialchars($project['smtp_user'] ?? '') ?>">
-                            <input type="hidden" name="smtp_pass" value="<?= htmlspecialchars($project['smtp_pass'] ?? '') ?>">
+                            <input type="hidden" name="smtp_pass" value="">
                             <input type="hidden" name="smtp_secure" value="<?= htmlspecialchars($project['smtp_secure'] ?? 'tls') ?>">
                             <input type="hidden" name="smtp_from" value="<?= htmlspecialchars($project['smtp_from'] ?? '') ?>">
                             <input type="hidden" name="audit_email_recipient" value="<?= htmlspecialchars($project['audit_email_recipient'] ?? '') ?>">
@@ -1831,7 +1899,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                             <input type="text" name="webhook_url" value="<?= htmlspecialchars($project['webhook_url'] ?? '') ?>" placeholder="https://app.deinefirma.de/api/legal-webhook" style="width:100%;margin-bottom:14px">
 
                             <label class="pg-label" style="margin-top:0"><?= htmlspecialchars(t('admin.settings.webhooks.secret_label')) ?> <span style="color:var(--text-faint);font-weight:400"><?= htmlspecialchars(t('admin.settings.webhooks.secret_hint')) ?></span><?= help_icon(t('admin.settings.webhooks.secret_help')) ?></label>
-                            <input type="text" name="webhook_secret" value="<?= htmlspecialchars($project['webhook_secret'] ?? '') ?>" placeholder="<?= htmlspecialchars(t('admin.settings.webhooks.secret_placeholder')) ?>" style="width:100%;margin-bottom:14px">
+                            <input type="text" name="webhook_secret" value="" placeholder="<?= htmlspecialchars(!empty($project['webhook_secret']) ? t('admin.common.secret_already_set') : t('admin.settings.webhooks.secret_placeholder')) ?>" style="width:100%;margin-bottom:14px">
 
                             <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:16px">
                                 <button type="submit" class="pg-btn-secondary"><?= svg_icon('disk', '', 14) ?> <?= htmlspecialchars(t('admin.settings.webhooks.save_button')) ?></button>
@@ -1842,7 +1910,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
 
                             <div style="border-top:1px solid var(--border-soft);padding-top:16px">
                                 <label class="pg-label" style="margin-top:0"><?= htmlspecialchars(t('admin.settings.webhooks.deepl_label')) ?> <span style="color:var(--text-faint);font-weight:400"><?= htmlspecialchars(t('admin.settings.webhooks.deepl_hint')) ?></span></label>
-                                <input type="text" name="deepl_api_key" value="<?= htmlspecialchars($project['deepl_api_key'] ?? '') ?>" placeholder="z. B. xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx:fx" style="width:100%">
+                                <input type="text" name="deepl_api_key" value="" placeholder="<?= !empty($project['deepl_api_key']) ? htmlspecialchars(t('admin.common.secret_already_set')) : 'z. B. xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx:fx' ?>" style="width:100%">
                                 <?php if (!empty($envDeepl)): ?>
                                     <div class="pg-hint" style="color:var(--green)"><?= htmlspecialchars(t('admin.settings.webhooks.deepl_env_hint')) ?></div>
                                 <?php else: ?>
@@ -1858,7 +1926,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                                     <option value="claude" <?= ($project['ai_provider'] ?? '') === 'claude' ? 'selected' : '' ?>><?= htmlspecialchars(t('admin.settings.ai_import.provider_claude')) ?></option>
                                     <option value="openai" <?= ($project['ai_provider'] ?? '') === 'openai' ? 'selected' : '' ?>><?= htmlspecialchars(t('admin.settings.ai_import.provider_openai')) ?></option>
                                 </select>
-                                <input type="password" name="ai_api_key" value="<?= htmlspecialchars($project['ai_api_key'] ?? '') ?>" placeholder="<?= htmlspecialchars(t('admin.settings.ai_import.key_placeholder')) ?>" style="width:100%" autocomplete="off">
+                                <input type="password" name="ai_api_key" value="" placeholder="<?= htmlspecialchars(!empty($project['ai_api_key']) ? t('admin.common.secret_already_set') : t('admin.settings.ai_import.key_placeholder')) ?>" style="width:100%" autocomplete="new-password">
                                 <?php if (!empty($envAiKey)): ?>
                                     <div class="pg-hint" style="color:var(--green)"><?= htmlspecialchars(t('admin.settings.ai_import.env_hint')) ?></div>
                                 <?php endif; ?>
@@ -1870,6 +1938,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                         <h2><?= htmlspecialchars(t('admin.settings.company.heading')) ?></h2>
                         <p class="pg-card-sub" style="margin-bottom:16px"><?= t('admin.settings.company.subtitle') ?></p>
                         <form method="post">
+                            <?= csrf_field() ?>
                             <input type="hidden" name="action" value="save_project">
                             <input type="hidden" name="name" value="<?= htmlspecialchars($project['name']) ?>">
                             <input type="hidden" name="domain" value="<?= htmlspecialchars($project['domain']) ?>">
@@ -1883,15 +1952,15 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                             <input type="hidden" name="smtp_host" value="<?= htmlspecialchars($project['smtp_host'] ?? '') ?>">
                             <input type="hidden" name="smtp_port" value="<?= htmlspecialchars((string)($project['smtp_port'] ?? 587)) ?>">
                             <input type="hidden" name="smtp_user" value="<?= htmlspecialchars($project['smtp_user'] ?? '') ?>">
-                            <input type="hidden" name="smtp_pass" value="<?= htmlspecialchars($project['smtp_pass'] ?? '') ?>">
+                            <input type="hidden" name="smtp_pass" value="">
                             <input type="hidden" name="smtp_secure" value="<?= htmlspecialchars($project['smtp_secure'] ?? 'tls') ?>">
                             <input type="hidden" name="smtp_from" value="<?= htmlspecialchars($project['smtp_from'] ?? '') ?>">
                             <input type="hidden" name="audit_email_recipient" value="<?= htmlspecialchars($project['audit_email_recipient'] ?? '') ?>">
                             <input type="hidden" name="consent_logging_enabled" value="<?= !empty($project['consent_logging_enabled']) ? '1' : '0' ?>">
                             <input type="hidden" name="consent_log_retention_days" value="<?= htmlspecialchars((string)($project['consent_log_retention_days'] ?? 1095)) ?>">
                             <input type="hidden" name="webhook_url" value="<?= htmlspecialchars($project['webhook_url'] ?? '') ?>">
-                            <input type="hidden" name="webhook_secret" value="<?= htmlspecialchars($project['webhook_secret'] ?? '') ?>">
-                            <input type="hidden" name="deepl_api_key" value="<?= htmlspecialchars($project['deepl_api_key'] ?? '') ?>">
+                            <input type="hidden" name="webhook_secret" value="">
+                            <input type="hidden" name="deepl_api_key" value="">
 
                             <div class="grid">
                                 <div>
@@ -1930,6 +1999,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                         </form>
                         <?php if (count($projects) > 1): ?>
                             <form id="deleteProjectForm" method="post" onsubmit="return confirm('<?= htmlspecialchars(t('admin.settings.company.confirm_delete_project', ['project' => $project['name']]), ENT_QUOTES) ?>');" style="display:none">
+                                <?= csrf_field() ?>
                                 <input type="hidden" name="action" value="delete_project">
                                 <input type="hidden" name="delete_project_id" value="<?= $project['id'] ?>">
                             </form>
@@ -1950,6 +2020,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                             <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:4px">
                                 <h2 style="margin:0;font-size:14px"><?= htmlspecialchars(t('admin.settings.backup.auto_heading')) ?><?= help_icon(t('admin.settings.backup.auto_help')) ?></h2>
                                 <form method="post" style="margin:0">
+                                    <?= csrf_field() ?>
                                     <input type="hidden" name="action" value="run_backup_now">
                                     <button type="submit" class="pg-btn-secondary" style="padding:6px 12px;font-size:12px"><?= htmlspecialchars(t('admin.settings.backup.run_now_button')) ?></button>
                                 </form>
@@ -2006,6 +2077,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                                 <?php if ($isManagedCloud): ?> <?= htmlspecialchars(t('admin.settings.restore.warning_cloud_domain')) ?><?php endif; ?>
                             </div>
                             <form method="post" enctype="multipart/form-data" id="restoreForm" onsubmit="return confirm(<?= json_encode(t('admin.settings.restore.confirm_dialog')) ?>);">
+                                <?= csrf_field() ?>
                                 <input type="hidden" name="action" value="restore_backup_upload">
                                 <input type="file" name="backup_file" accept=".sqlite" required style="width:100%;margin-bottom:10px">
                                 <label style="display:flex;align-items:flex-start;gap:8px;font-size:12.5px;font-weight:500;margin-bottom:12px">
@@ -2034,6 +2106,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                                 <?= htmlspecialchars(t('admin.settings.project_transfer.import_warning')) ?>
                             </div>
                             <form method="post" enctype="multipart/form-data" id="projectImportForm" onsubmit="return confirm(<?= json_encode(t('admin.settings.project_transfer.confirm_dialog')) ?>);">
+                                <?= csrf_field() ?>
                                 <input type="hidden" name="action" value="import_project_upload">
                                 <label class="pg-label" style="margin-top:0;font-size:12.5px"><?= htmlspecialchars(t('admin.settings.project_transfer.target_label')) ?></label>
                                 <select name="target_project_id" required style="width:100%;margin-bottom:10px">
@@ -2056,6 +2129,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                         <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:4px">
                             <h2 style="margin:0"><?= htmlspecialchars(t('admin.settings.queue.heading')) ?><?= help_icon(t('admin.settings.queue.help')) ?></h2>
                             <form method="post" style="margin:0">
+                                <?= csrf_field() ?>
                                 <input type="hidden" name="action" value="run_webhook_queue_now">
                                 <button type="submit" class="pg-btn-secondary" style="padding:6px 12px;font-size:12px"><?= htmlspecialchars(t('admin.settings.queue.run_now_button')) ?></button>
                             </form>
@@ -2078,6 +2152,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                             <h2 style="margin:0"><?= htmlspecialchars(t('admin.settings.log.heading')) ?></h2>
                             <?php if (!empty($logs)): ?>
                                 <form method="post" style="margin:0;">
+                                    <?= csrf_field() ?>
                                     <input type="hidden" name="action" value="clear_webhook_logs">
                                     <button type="submit" class="pg-btn-secondary" style="padding:6px 12px;font-size:12px"><?= htmlspecialchars(t('admin.settings.log.clear_button')) ?></button>
                                 </form>
@@ -2138,6 +2213,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
         </div>
 
         <script>
+            const CSRF_TOKEN = <?= json_encode(csrf_token()) ?>;
             const i18n = {
                 copySuccess: <?= json_encode(t('admin.settings.js.copy_success')) ?>,
                 copyFailed: <?= json_encode(t('admin.matrix.js.copy_failed')) ?>,
@@ -2232,6 +2308,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
             async function triggerTestWebhook() {
                 const formData = new FormData();
                 formData.append('action', 'test_webhook');
+                formData.append('csrf_token', CSRF_TOKEN);
                 try {
                     const res = await fetch(window.location.href, { method: 'POST', body: formData });
                     const data = await res.json();
@@ -2250,6 +2327,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
             async function triggerTestMail() {
                 const formData = new FormData();
                 formData.append('action', 'test_smtp');
+                formData.append('csrf_token', CSRF_TOKEN);
                 try {
                     const res = await fetch(window.location.href, { method: 'POST', body: formData });
                     const data = await res.json();
@@ -2371,6 +2449,7 @@ function render_users_view(PDO $db, array $project, array $projects): void {
                                                 <?php endif; ?>
                                                 <?php if ($u['status'] === 'invited'): ?>
                                                     <form method="post" style="margin:0">
+                                                        <?= csrf_field() ?>
                                                         <input type="hidden" name="action" value="resend_invite">
                                                         <input type="hidden" name="user_id" value="<?= $u['id'] ?>">
                                                         <button type="submit" class="pg-icon-btn" title="<?= htmlspecialchars(t('admin.users.resend_invite_title')) ?>">
@@ -2382,6 +2461,7 @@ function render_users_view(PDO $db, array $project, array $projects): void {
                                                     <span style="color:var(--text-faintest);padding:6px 8px">&mdash;</span>
                                                 <?php else: ?>
                                                     <form method="post" onsubmit="return confirm('<?= htmlspecialchars(t('admin.users.confirm_delete', ['name' => $u['name']]), ENT_QUOTES) ?>');" style="margin:0">
+                                                        <?= csrf_field() ?>
                                                         <input type="hidden" name="action" value="delete_user">
                                                         <input type="hidden" name="user_id" value="<?= $u['id'] ?>">
                                                         <button type="submit" class="pg-icon-btn danger" title="<?= htmlspecialchars(t('admin.users.delete_title')) ?>">
@@ -2399,6 +2479,7 @@ function render_users_view(PDO $db, array $project, array $projects): void {
 
                         <?php foreach ($users as $u): ?>
                             <form id="uf-<?= (int)$u['id'] ?>" method="post" hidden>
+                                <?= csrf_field() ?>
                                 <input type="hidden" name="action" value="update_user_projects">
                                 <input type="hidden" name="user_id" value="<?= (int)$u['id'] ?>">
                             </form>
@@ -2417,6 +2498,7 @@ function render_users_view(PDO $db, array $project, array $projects): void {
                 <p style="font-size:13px;color:var(--text-muted);margin:0 0 20px"><?= htmlspecialchars(t('admin.users.modal.desc')) ?></p>
 
                 <form method="post">
+                    <?= csrf_field() ?>
                     <input type="hidden" name="action" value="invite_user">
 
                     <label class="pg-label" style="margin-top:0"><?= htmlspecialchars(t('admin.users.modal.name_label')) ?></label>
@@ -2543,7 +2625,11 @@ function render_consent_log_view(PDO $db, array $project, array $projects): void
 }
 
 function render_audit_view(PDO $db, array $project, array $projects): void {
-    $stmt = $db->prepare("SELECT * FROM audit_log WHERE project_id = ? OR project_id IS NULL ORDER BY created_at DESC LIMIT 200");
+    if (current_user_is_primary_admin()) {
+        $stmt = $db->prepare("SELECT * FROM audit_log WHERE project_id = ? OR project_id IS NULL ORDER BY created_at DESC LIMIT 200");
+    } else {
+        $stmt = $db->prepare("SELECT * FROM audit_log WHERE project_id = ? ORDER BY created_at DESC LIMIT 200");
+    }
     $stmt->execute([$project['id']]);
     $entries = $stmt->fetchAll();
     ?>

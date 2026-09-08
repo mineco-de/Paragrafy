@@ -120,7 +120,7 @@ One Paragrafy instance can serve an unlimited number of projects, each with its 
 └── paragrafy_data.sqlite # SQLite database (created automatically)
 ```
 
-With Docker, `config.php`, `.env.local`, `backups/`, and `paragrafy_data.sqlite` live under `PARAGRAFY_DATA_DIR` instead (`/var/www/html/data`, mounted to `./data`).
+With Docker, `config.php`, `.env.local`, `backups/`, and `paragrafy_data.sqlite` live under `PARAGRAFY_DATA_DIR` instead — `/var/www/data` inside the container (deliberately *outside* the `/var/www/html` docroot so nothing there is ever web-reachable), mounted to `./data` on the host.
 
 ---
 
@@ -142,7 +142,9 @@ https://your-domain.example/install.php
 
 The image is built from your local checkout (`COPY . /var/www/html/` in the Dockerfile) — it doesn't pull code from GitHub itself, so `docker compose up -d --build` reliably reflects your current state instead of getting stuck on an old layer cache.
 
-**Persistence:** `docker-compose.yaml` mounts `./data` to `/var/www/html/data` and sets `PARAGRAFY_DATA_DIR=/var/www/html/data` — this is where `paragrafy_data.sqlite`, `config.php`, `/backups`, and an optional `.env.local` live. Without this volume, your database and admin credentials are lost on every `--build`. The container automatically sets correct file permissions on this folder at startup (via `docker-entrypoint.sh`), even if the host directory didn't previously exist.
+**Persistence:** `docker-compose.yaml` mounts `./data` to `/var/www/data` (outside the Apache docroot) and sets `PARAGRAFY_DATA_DIR=/var/www/data` — this is where `paragrafy_data.sqlite`, `config.php`, `/backups`, and an optional `.env.local` live. Without this volume, your database and admin credentials are lost on every `--build`. The container automatically sets correct file permissions on this folder at startup (via `docker-entrypoint.sh`), even if the host directory didn't previously exist.
+
+> **Upgrading an existing self-hosted Docker install:** versions built before 2026-09-08 used `/var/www/html/data` (inside the docroot) as the container path. The host-side `./data` folder is unchanged, so a plain `git pull` + `docker compose up -d --build` picks up the new, safer container path automatically — no manual data migration needed.
 
 ### Option B: Apache / bare metal
 
@@ -172,7 +174,9 @@ sudo find /var/www/paragrafy -type f -exec chmod 644 {} +
 </VirtualHost>
 ```
 
-`PARAGRAFY_DATA_DIR` is not needed here — the database and config live directly in the project folder, as usual.
+`PARAGRAFY_DATA_DIR` is not needed here — the database and config live directly in the project folder, as usual (the bundled `.htaccess` denies direct HTTP access to `*.sqlite*`, `config.php`, and `.env*` as a safety net).
+
+> **Multi-tenant hosting note:** Paragrafy resolves which project to serve from the request's `Host` header against the `projects.domain` column — this is what lets one instance serve several customer domains. Make sure your webserver only routes requests for domains you've actually registered to this vhost (no catch-all/default vhost pointing here); otherwise a request with a spoofed `Host` header sent straight to the server's IP could resolve to a project it shouldn't.
 
 ### First run
 
