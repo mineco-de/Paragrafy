@@ -834,6 +834,46 @@ function find_unambiguous_match(PDO $db, string $sql, array $params): ?array {
 }
 
 /**
+ * Findet die oeffentlich auslieferbare Uebersetzung fuer genau die angefragte ($lang, $slug)-
+ * Kombination -- der Normalfall, BEVOR ueberhaupt ein Sprach-Fallback in Betracht gezogen wird.
+ * Historisch war das eine einzelne Query mit `t.slug = ? OR dt.slug = ?`, die (genau wie der
+ * urspruengliche Fallback-Entwurf) bei zwei Dokumenten mit kollidierendem Slug in derselben
+ * Sprache per ungeordnetem LIMIT 1 haette das falsche Dokument waehlen koennen. Nutzt jetzt
+ * dieselbe find_unambiguous_match()-Disziplin wie find_public_translation_with_fallback():
+ * kombinierte Query ueber dt.slug (nur Dokumente mit einer $lang-Uebersetzung) und t.slug (in
+ * genau $lang), nur bei GENAU EINEM Treffer wird aufgeloest.
+ */
+function find_public_translation(PDO $db, int $projectId, string $lang, string $slug): ?array {
+    $doc = find_unambiguous_match(
+        $db,
+        "SELECT DISTINCT d.id FROM documents d
+         JOIN doc_types dt ON d.doc_type_id = dt.id
+         JOIN translations t ON t.document_id = d.id AND t.lang = ? AND t.status = 'published'
+         WHERE d.project_id = ? AND dt.slug = ?
+         UNION
+         SELECT DISTINCT d.id FROM translations t
+         JOIN documents d ON t.document_id = d.id
+         WHERE d.project_id = ? AND t.lang = ? AND t.slug = ? AND t.status = 'published'",
+        [$lang, $projectId, $slug, $projectId, $lang, $slug]
+    );
+
+    if (!$doc) {
+        return null;
+    }
+
+    $stmt = $db->prepare("
+        SELECT t.*, d.doc_type_id, dt.title AS default_title, dt.slug AS default_slug
+        FROM translations t
+        JOIN documents d ON t.document_id = d.id
+        JOIN doc_types dt ON d.doc_type_id = dt.id
+        WHERE t.document_id = ? AND t.lang = ? AND t.status = 'published'
+        LIMIT 1
+    ");
+    $stmt->execute([$doc['id'], $lang]);
+    return $stmt->fetch() ?: null;
+}
+
+/**
  * Findet eine oeffentlich auslieferbare Uebersetzung fuer $slug, wenn die exakt angefragte
  * $lang keine veroeffentlichte Version hat. Das Dokument wird ueber JEDE Sprache anhand des
  * Slugs identifiziert -- ueber BEIDE moeglichen Quellen in EINER kombinierten Abfrage (nicht

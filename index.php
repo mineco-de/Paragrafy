@@ -153,16 +153,7 @@ if (count($parts) === 1) {
     $slug = strtolower($parts[1]);
 }
 
-$stmt = $db->prepare("
-    SELECT t.*, d.doc_type_id, dt.title AS default_title, dt.slug AS default_slug
-    FROM translations t
-    JOIN documents d ON t.document_id = d.id
-    JOIN doc_types dt ON d.doc_type_id = dt.id
-    WHERE d.project_id = ? AND t.lang = ? AND (t.slug = ? OR dt.slug = ?) AND t.status = 'published'
-    LIMIT 1
-");
-$stmt->execute([$project['id'], $lang, $slug, $slug]);
-$trans = $stmt->fetch();
+$trans = find_public_translation($db, (int)$project['id'], $lang, $slug);
 
 $fallbackFromLang = null;
 if (!$trans && !$isPreview) {
@@ -462,16 +453,7 @@ function handle_json_api(array $parts, array $project, PDO $db, string $primaryL
         return;
     }
 
-    $stmt = $db->prepare("
-        SELECT t.id, t.title, t.slug, t.lang, t.content, t.updated_at, t.change_note, t.scheduled_at, t.scheduled_title, t.scheduled_slug, t.scheduled_content
-        FROM translations t
-        JOIN documents d ON t.document_id = d.id
-        JOIN doc_types dt ON d.doc_type_id = dt.id
-        WHERE d.project_id = ? AND t.lang = ? AND (t.slug = ? OR dt.slug = ?) AND t.status = 'published'
-        LIMIT 1
-    ");
-    $stmt->execute([$project['id'], $lang, $slug, $slug]);
-    $doc = $stmt->fetch();
+    $doc = find_public_translation($db, (int)$project['id'], $lang, $slug);
 
     $fallbackFromLang = null;
     if (!$doc && !$isPreview) {
