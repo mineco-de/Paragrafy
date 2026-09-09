@@ -246,7 +246,8 @@ function ensure_schema_migrations(PDO $pdo): void {
                 'consent_logging_enabled' => "INTEGER DEFAULT 0",
                 'consent_log_retention_days' => "INTEGER DEFAULT 1095",
                 'ai_provider' => "TEXT DEFAULT ''",
-                'ai_api_key' => "TEXT DEFAULT ''"
+                'ai_api_key' => "TEXT DEFAULT ''",
+                'settings_updated_at' => "DATETIME DEFAULT CURRENT_TIMESTAMP"
             ];
             foreach ($newCols as $c => $type) {
                 if (!in_array($c, $colNames)) {
@@ -2140,6 +2141,7 @@ function export_project_backup(PDO $db, int $projectId): array {
                 ai_provider TEXT DEFAULT '', ai_api_key TEXT DEFAULT '',
                 company_name TEXT DEFAULT '', address TEXT DEFAULT '', email TEXT DEFAULT '',
                 phone TEXT DEFAULT '', representative TEXT DEFAULT '', register_info TEXT DEFAULT '',
+                settings_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE doc_types (

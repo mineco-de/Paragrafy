@@ -10,19 +10,50 @@ define('PUBLIC_CACHE_MAX_AGE_DAYS', 30);
 define('PUBLIC_CACHE_MAX_AGE_SECONDS', 300);
 
 /**
- * Baut den ETag fuer ein oeffentlich ausgeliefertes Dokument. PARAGRAFY_VERSION
- * fliesst mit ein, damit ein Deploy mit geaendertem Rendering (Template/Sanitizing)
- * automatisch alle bisherigen ETags invalidiert, ohne die DB anzufassen.
+ * Zeitpunkt des letzten Deploys, ueber den Dateimtime der Rendering-relevanten Skripte
+ * geschaetzt: aendert sich automatisch bei jedem Deploy (git pull/rsync/Docker-Build
+ * aktualisieren Datei-mtimes), ohne dass PARAGRAFY_VERSION manuell in ein Datum
+ * uebersetzt werden muesste. Dient als untere Schranke fuer Last-Modified, damit ein
+ * reiner If-Modified-Since-Abgleich (ohne ETag) nach einem Rendering-Deploy nicht
+ * faelschlich 304 liefert, obwohl sich die Translation selbst nicht geaendert hat.
  */
-function build_public_cache_etag(int $projectId, string $lang, string $slug, string $updatedAt): string {
-    $hash = sha1($projectId . '|' . $lang . '|' . $slug . '|' . $updatedAt . '|' . PARAGRAFY_VERSION);
+function public_cache_deploy_ts(): int {
+    static $ts = null;
+    if ($ts === null) {
+        $ts = 0;
+        foreach (['index.php', 'db.php', 'cache.php'] as $file) {
+            $mtime = @filemtime(PARAGRAFY_DIR . '/' . $file);
+            if ($mtime !== false) {
+                $ts = max($ts, $mtime);
+            }
+        }
+    }
+    return $ts;
+}
+
+/**
+ * Baut den ETag fuer ein oeffentlich ausgeliefertes Dokument. Fliessen ein:
+ * PARAGRAFY_VERSION (ein Deploy mit geaendertem Rendering invalidiert automatisch alle
+ * bisherigen ETags) sowie $projectUpdatedAt (Projekt-Stammdaten wie Firmenname/Adresse/
+ * Branding werden per replace_placeholders() bzw. direkt ins Template eingebettet -
+ * ohne diesen Wert wuerde eine Aenderung dieser Felder den Cache nicht invalidieren).
+ */
+function build_public_cache_etag(int $projectId, string $lang, string $slug, string $updatedAt, string $projectUpdatedAt): string {
+    $hash = sha1($projectId . '|' . $lang . '|' . $slug . '|' . $updatedAt . '|' . $projectUpdatedAt . '|' . PARAGRAFY_VERSION);
     return '"' . $hash . '"';
 }
 
-/** SQLite CURRENT_TIMESTAMP liefert UTC ("YYYY-MM-DD HH:MM:SS"). */
-function build_public_last_modified(string $updatedAtSql): int {
-    $ts = strtotime($updatedAtSql . ' UTC');
-    return $ts !== false ? $ts : time();
+/**
+ * SQLite CURRENT_TIMESTAMP liefert UTC ("YYYY-MM-DD HH:MM:SS"). Last-Modified ist das
+ * juengste der drei Freshness-Signale (Dokument-Update, Projekt-Stammdaten-Update,
+ * Code-Deploy), damit ein reiner If-Modified-Since-Vergleich (ohne ETag) keinen Fall
+ * uebersieht, den der ETag bereits abdeckt.
+ */
+function build_public_last_modified(string $updatedAtSql, string $projectUpdatedAtSql = ''): int {
+    $docTs = strtotime($updatedAtSql . ' UTC') ?: 0;
+    $projectTs = $projectUpdatedAtSql !== '' ? (strtotime($projectUpdatedAtSql . ' UTC') ?: 0) : 0;
+    $ts = max($docTs, $projectTs, public_cache_deploy_ts());
+    return $ts > 0 ? $ts : time();
 }
 
 /**

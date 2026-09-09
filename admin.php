@@ -528,7 +528,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 deepl_api_key=?, ai_provider=?, ai_api_key=?, logo_url=?, webhook_url=?, webhook_secret=?, audit_interval_months=?,
                 smtp_host=?, smtp_port=?, smtp_user=?, smtp_pass=?, smtp_secure=?, smtp_from=?, audit_email_recipient=?,
                 cookie_banner_enabled=?, cookie_banner_text=?, consent_logging_enabled=?, consent_log_retention_days=?,
-                company_name=?, address=?, email=?, phone=?, representative=?, register_info=?
+                company_name=?, address=?, email=?, phone=?, representative=?, register_info=?,
+                settings_updated_at=CURRENT_TIMESTAMP
             WHERE id=?
         ");
         $stmt->execute([

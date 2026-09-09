@@ -186,9 +186,9 @@ if ($isPreview) {
 } else {
     $previewContent = $trans['content'];
 
-    $etag = build_public_cache_etag((int)$project['id'], $lang, $liveSlug, $trans['updated_at']);
+    $etag = build_public_cache_etag((int)$project['id'], $lang, $liveSlug, $trans['updated_at'], (string)($project['settings_updated_at'] ?? ''));
     $etagHash = trim($etag, '"');
-    $lastMod = build_public_last_modified($trans['updated_at']);
+    $lastMod = build_public_last_modified($trans['updated_at'], (string)($project['settings_updated_at'] ?? ''));
 
     if (check_conditional_request($etag, $lastMod)) {
         exit;
@@ -213,15 +213,14 @@ $languages = $stmt->fetchAll();
 
 $content = replace_placeholders(sanitize_legal_html($previewContent), $project);
 
+ob_start();
+render_public_document($project, $trans, $content, $languages, $lang, $isPreview, $liveSlug);
+$html = ob_get_clean();
+
 if (!$isPreview) {
-    ob_start();
-    render_public_document($project, $trans, $content, $languages, $lang, $isPreview, $liveSlug);
-    $html = ob_get_clean();
     public_cache_put((int)$project['id'], 'html', $lang, $liveSlug, $etagHash, $html);
-    echo public_cache_fill_dynamic($html);
-} else {
-    render_public_document($project, $trans, $content, $languages, $lang, $isPreview, $liveSlug);
 }
+echo public_cache_fill_dynamic($html);
 
 function get_i18n_strings(string $lang): array {
     $dict = [
@@ -479,9 +478,9 @@ function handle_json_api(array $parts, array $project, PDO $db, string $primaryL
         $doc['slug'] = $doc['scheduled_slug'] !== '' ? $doc['scheduled_slug'] : $doc['slug'];
         $doc['content'] = $doc['scheduled_content'] !== '' ? $doc['scheduled_content'] : $doc['content'];
     } else {
-        $etag = build_public_cache_etag((int)$project['id'], $lang, $doc['slug'], $doc['updated_at']);
+        $etag = build_public_cache_etag((int)$project['id'], $lang, $doc['slug'], $doc['updated_at'], (string)($project['settings_updated_at'] ?? ''));
         $etagHash = trim($etag, '"');
-        $lastMod = build_public_last_modified($doc['updated_at']);
+        $lastMod = build_public_last_modified($doc['updated_at'], (string)($project['settings_updated_at'] ?? ''));
 
         if (check_conditional_request($etag, $lastMod)) {
             return;
