@@ -836,33 +836,34 @@ function find_unambiguous_match(PDO $db, string $sql, array $params): ?array {
 /**
  * Findet eine oeffentlich auslieferbare Uebersetzung fuer $slug, wenn die exakt angefragte
  * $lang keine veroeffentlichte Version hat. Das Dokument wird ueber JEDE Sprache anhand des
- * Slugs identifiziert, in zwei Schritten, beide ueber find_unambiguous_match() (siehe dort --
- * kein Raten bei mehrdeutigen Treffern):
+ * Slugs identifiziert -- ueber BEIDE moeglichen Quellen in EINER kombinierten Abfrage (nicht
+ * nacheinander gestaffelt), damit eine Mehrdeutigkeit ZWISCHEN den Quellen nicht uebersehen
+ * wird (z. B. wenn der kanonische Doc-Type-Slug eines Dokuments zufaellig auch der
+ * benutzerdefinierte Uebersetzungs-Slug eines ANDEREN, veroeffentlichten Dokuments ist):
  *
- * 1. Ueber dt.slug. doc_types.slug hat zwar ein UNIQUE-Constraint (der Doc-Type selbst ist also
- *    projektweit eindeutig ansprechbar), aber documents(project_id, doc_type_id) ist NICHT
- *    UNIQUE -- theoretisch koennten also mehrere documents-Zeilen desselben Doc-Types im selben
- *    Projekt existieren. Deckt den Normalfall (Aufruf des kanonischen Doc-Type-Slugs, z. B.
- *    /fr/impressum) ab, aber eben nicht garantiert eindeutig, daher ebenfalls ueber
- *    find_unambiguous_match() statt einem blinden LIMIT 1.
- * 2. Nur falls das nichts findet: ueber den benutzerdefinierten Uebersetzungs-Slug (t.slug). Der
- *    ist NICHT global eindeutig (nur UNIQUE(document_id, lang)) -- zwei verschiedene Dokumente
- *    KOENNEN also denselben eigenen Slug tragen.
+ * - dt.slug: doc_types.slug hat ein UNIQUE-Constraint (der Doc-Type selbst ist projektweit
+ *   eindeutig), aber documents(project_id, doc_type_id) ist NICHT UNIQUE -- deckt den Normalfall
+ *   (Aufruf des kanonischen Doc-Type-Slugs, z. B. /fr/impressum) ab, garantiert aber fuer sich
+ *   genommen keine Eindeutigkeit.
+ * - t.slug: der benutzerdefinierte Uebersetzungs-Slug, NICHT global eindeutig (nur
+ *   UNIQUE(document_id, lang)) -- zwei verschiedene Dokumente KOENNEN denselben eigenen Slug
+ *   tragen.
+ *
+ * UNION dedupliziert automatisch, wenn beide Quellen zufaellig auf dasselbe Dokument zeigen
+ * (haeufiger Normalfall: Standard-Vorlagen setzen den eigenen Slug meist gleich dem
+ * Doc-Type-Slug) -- das zaehlt weiterhin als eindeutig. Matchen zwei verschiedene Dokumente
+ * (egal ob beide ueber dieselbe Quelle oder je eine ueber dt.slug/t.slug), liefert
+ * find_unambiguous_match() bewusst kein Ergebnis statt zu raten -- bei oeffentlichen
+ * Rechtstexten ist das falsche Dokument auszuliefern schlimmer als ein 404.
  */
 function find_public_translation_with_fallback(PDO $db, int $projectId, string $lang, string $slug, string $primaryLang): ?array {
     $doc = find_unambiguous_match(
         $db,
-        "SELECT DISTINCT d.id FROM documents d JOIN doc_types dt ON d.doc_type_id = dt.id WHERE d.project_id = ? AND dt.slug = ?",
-        [$projectId, $slug]
+        "SELECT DISTINCT d.id FROM documents d JOIN doc_types dt ON d.doc_type_id = dt.id WHERE d.project_id = ? AND dt.slug = ?
+         UNION
+         SELECT DISTINCT d.id FROM translations t JOIN documents d ON t.document_id = d.id WHERE d.project_id = ? AND t.slug = ? AND t.status = 'published'",
+        [$projectId, $slug, $projectId, $slug]
     );
-
-    if (!$doc) {
-        $doc = find_unambiguous_match(
-            $db,
-            "SELECT DISTINCT d.id FROM translations t JOIN documents d ON t.document_id = d.id WHERE d.project_id = ? AND t.slug = ? AND t.status = 'published'",
-            [$projectId, $slug]
-        );
-    }
 
     if (!$doc) {
         return null;
