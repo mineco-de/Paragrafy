@@ -4,6 +4,12 @@
     RewriteBase /
 
     RewriteRule ^index\.php$ - [L]
+
+    # Public-Cache-Verzeichnis (siehe cache.php/PARAGRAFY_DATA_DIR): bei Bare-Metal-Installs
+    # kann es im Docroot liegen. Nie direkt per URL ausliefern (personenbezogene Daten je
+    # Mandant im Cache-Inhalt) -- redundant zur generellen Rewrite-Regel, aber explizit.
+    RewriteRule ^cache/ - [F,L]
+
     RewriteCond %{REQUEST_FILENAME} !-f
     RewriteCond %{REQUEST_FILENAME} !-d
     RewriteRule . /index.php [L]
