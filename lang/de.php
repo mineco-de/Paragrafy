@@ -236,6 +236,8 @@ return [
     // ---------------------------------------------------------------
     'admin.login.rate_limited' => 'Zu viele fehlgeschlagene Versuche. Bitte warte :minutes Minute(n) und versuche es erneut.',
     'admin.login.invalid_credentials' => 'Falsche Zugangsdaten.',
+    'admin.login.admin_password_login_disabled' => 'Der Admin-Passwort-Login ist für diese Instanz deaktiviert. Bitte über das SaaS-Dashboard anmelden (SSO).',
+    'admin.sso.token_already_used' => 'Token bereits verwendet.',
     'admin.login.page_title' => 'Paragrafy Admin Login',
     'admin.login.heading' => 'Paragrafy Admin',
     'admin.login.email_label' => 'E-Mail',

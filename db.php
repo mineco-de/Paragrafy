@@ -181,6 +181,18 @@ function ensure_schema_migrations(PDO $pdo): void {
             if (!in_array('invite_token_expires_at', $userColNames)) {
                 $pdo->exec("ALTER TABLE users ADD COLUMN invite_token_expires_at DATETIME DEFAULT NULL");
             }
+            if (!in_array('totp_secret', $userColNames)) {
+                $pdo->exec("ALTER TABLE users ADD COLUMN totp_secret TEXT NULL");
+            }
+            if (!in_array('totp_enabled_at', $userColNames)) {
+                $pdo->exec("ALTER TABLE users ADD COLUMN totp_enabled_at DATETIME NULL");
+            }
+            if (!in_array('totp_recovery_codes', $userColNames)) {
+                $pdo->exec("ALTER TABLE users ADD COLUMN totp_recovery_codes TEXT NULL");
+            }
+            if (!in_array('totp_last_used_step', $userColNames)) {
+                $pdo->exec("ALTER TABLE users ADD COLUMN totp_last_used_step INTEGER NULL");
+            }
         }
 
         $stmtTrans = $pdo->query("SELECT name FROM sqlite_master WHERE type='table' AND name='translations'");
@@ -203,6 +215,13 @@ function ensure_schema_migrations(PDO $pdo): void {
                 }
             }
         }
+
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS sso_nonces (
+                nonce TEXT PRIMARY KEY,
+                used_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+        ");
 
         $pdo->exec("
             CREATE TABLE IF NOT EXISTS webhook_logs (
@@ -411,7 +430,16 @@ function init_database_schema(PDO $pdo): void {
             activated_at DATETIME DEFAULT NULL,
             locale TEXT DEFAULT 'de',
             notes TEXT DEFAULT '',
-            invite_token_expires_at DATETIME DEFAULT NULL
+            invite_token_expires_at DATETIME DEFAULT NULL,
+            totp_secret TEXT NULL,
+            totp_enabled_at DATETIME NULL,
+            totp_recovery_codes TEXT NULL,
+            totp_last_used_step INTEGER NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sso_nonces (
+            nonce TEXT PRIMARY KEY,
+            used_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
         CREATE TABLE IF NOT EXISTS user_projects (

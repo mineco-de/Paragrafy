@@ -73,7 +73,7 @@ if (isset($_POST['action']) && $_POST['action'] === 'login') {
                 $_SESSION['paragrafy_user_locale'] = $user['locale'] ?? 'de';
                 $loggedIn = true;
             }
-        } elseif (password_verify($pass, $config['admin_password_hash'] ?? '')) {
+        } elseif (empty($config['admin_password_login_disabled']) && password_verify($pass, $config['admin_password_hash'] ?? '')) {
             session_regenerate_id(true);
             $_SESSION['paragrafy_admin'] = true;
             $_SESSION['paragrafy_user_name'] = 'Admin';
@@ -93,7 +93,9 @@ if (isset($_POST['action']) && $_POST['action'] === 'login') {
         if ($acctIdentifier !== null) {
             record_login_failure($db, $acctIdentifier);
         }
-        $error = t('admin.login.invalid_credentials');
+        $error = ($email === '' && !empty($config['admin_password_login_disabled']))
+            ? t('admin.login.admin_password_login_disabled')
+            : t('admin.login.invalid_credentials');
     }
 }
 
@@ -936,7 +938,7 @@ function handle_sso_login(array $config): void {
     $json = base64_decode($padded, true);
     $payload = $json === false ? null : json_decode($json, true);
 
-    if (!is_array($payload) || !isset($payload['exp']) || !is_int($payload['exp'])) {
+    if (!is_array($payload) || !isset($payload['exp']) || !is_int($payload['exp']) || !isset($payload['n']) || !is_string($payload['n']) || $payload['n'] === '') {
         header('Location: /admin');
         return;
     }
@@ -944,6 +946,34 @@ function handle_sso_login(array $config): void {
     if ($payload['exp'] < time()) {
         header('Location: /admin');
         return;
+    }
+
+    // Signatur und Ablauf sind bereits geprueft -- ab hier ist das Token
+    // "echt" und darf die Nonce-Tabelle beruehren. Die Reihenfolge ist
+    // wichtig: wuerde die Nonce-Pruefung vor der Signaturpruefung laufen,
+    // koennte ein beliebiges, nicht signiertes Token die Tabelle befuellen
+    // (kleiner DoS-Vektor).
+    $db = get_db();
+    try {
+        $db->prepare('INSERT INTO sso_nonces (nonce) VALUES (?)')->execute([$payload['n']]);
+    } catch (\PDOException $e) {
+        // UNIQUE-Constraint-Verletzung (SQLite Code 19) = Nonce wurde bereits
+        // eingeloest -- Replay ablehnen. Das INSERT ist selbst der atomare
+        // "pruefen + als benutzt markieren"-Schritt, SQLite serialisiert
+        // Writes ohnehin, kein zusaetzliches Locking noetig.
+        http_response_code(403);
+        exit(t('admin.sso.token_already_used'));
+    }
+
+    // Gelegentliches, beilaeufiges Aufraeumen abgelaufener Nonces -- diese
+    // sind laengst nicht mehr einloesbar, die Zeile dient nur noch der
+    // Replay-Erkennung waehrend der TTL. Retention ist unkritisch (keine
+    // personenbezogenen Daten, nur Zufallsstrings + Zeitstempel).
+    if (random_int(1, 20) === 1) {
+        try {
+            $db->exec("DELETE FROM sso_nonces WHERE used_at < datetime('now', '-1 hour')");
+        } catch (\PDOException $e) {
+        }
     }
 
     session_regenerate_id(true);

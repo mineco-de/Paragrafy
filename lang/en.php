@@ -211,6 +211,8 @@ return [
     // ---------------------------------------------------------------
     'admin.login.rate_limited' => 'Too many failed attempts. Please wait :minutes minute(s) and try again.',
     'admin.login.invalid_credentials' => 'Invalid credentials.',
+    'admin.login.admin_password_login_disabled' => 'Admin password login is disabled for this instance. Please sign in via the SaaS dashboard (SSO).',
+    'admin.sso.token_already_used' => 'Token already used.',
     'admin.login.page_title' => 'Paragrafy Admin Login',
     'admin.login.heading' => 'Paragrafy Admin',
     'admin.login.email_label' => 'Email',
