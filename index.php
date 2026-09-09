@@ -774,7 +774,7 @@ function render_public_overview(array $project, PDO $db, string $lang, string $p
     $documents = $stmt->fetchAll();
 
     $stmt = $db->prepare("
-        SELECT t.document_id, t.lang, t.title, t.slug
+        SELECT t.document_id, t.lang, t.title
         FROM translations t
         JOIN documents d ON t.document_id = d.id
         WHERE d.project_id = ? AND t.status = 'published'
@@ -791,7 +791,6 @@ function render_public_overview(array $project, PDO $db, string $lang, string $p
         $best = pick_fallback_translation($candidates, $lang, $primaryLang);
         $docs[] = [
             'title' => $best['title'] ?? null,
-            'slug' => $best['slug'] ?? null,
             'default_slug' => $document['default_slug'],
             'fallback_title' => $document['fallback_title'],
             'is_fallback' => $best !== null && $best['lang'] !== $lang,
@@ -833,7 +832,12 @@ function render_public_overview(array $project, PDO $db, string $lang, string $p
                 <?php foreach ($docs as $doc): ?>
                     <?php if ($doc['title']): ?>
                         <li>
-                            <a href="/<?= htmlspecialchars($lang) ?>/<?= htmlspecialchars($doc['slug'] ?: $doc['default_slug']) ?>">
+                            <!-- Immer default_slug (dt.slug, projektweit eindeutig per UNIQUE-Constraint)
+                                 statt der aufgeloesten Uebersetzung eigenem Slug: der eigene Slug ist NICHT
+                                 global eindeutig und koennte beim Aufruf ueber find_public_translation()/
+                                 find_public_translation_with_fallback() als mehrdeutig verworfen werden,
+                                 obwohl die Uebersicht das Dokument hier eindeutig kannte. -->
+                            <a href="/<?= htmlspecialchars($lang) ?>/<?= htmlspecialchars($doc['default_slug']) ?>">
                                 <span><?= htmlspecialchars($doc['title']) ?><?php if ($doc['is_fallback']): ?> <span style="font-size:10px;font-weight:700;color:var(--text-faint);border:1px solid var(--border);border-radius:4px;padding:1px 5px;vertical-align:middle;"><?= htmlspecialchars(strtoupper($doc['fallback_lang'])) ?></span><?php endif; ?></span>
                                 <span>&rarr;</span>
                             </a>
