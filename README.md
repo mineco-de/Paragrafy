@@ -73,6 +73,7 @@ Built for agencies, SaaS operators, and anyone who maintains legal pages for mor
 - **Language tabs in the editor** — active languages appear as tabs, with an optional side-by-side comparison view against a reference language.
 - **Dark mode** — light/dark/auto toggle in settings, stored per browser, with no effect on other users or public legal pages.
 - **Login protection** — failed login attempts are throttled per IP address (5 attempts / 15 minutes) to slow down brute-force attacks.
+- **Optional Two-Factor Authentication (TOTP)** — any user account (and, self-hosted, the admin account) can enable RFC 6238 two-factor auth with QR-code setup and one-time recovery codes. See [Two-Factor Authentication (TOTP)](#-two-factor-authentication-totp) below.
 
 ---
 
@@ -107,6 +108,12 @@ One Paragrafy instance can serve an unlimited number of projects, each with its 
 ├── editor.php            # Language-tab editor with scheduled publishing & version history
 ├── install.php           # Interactive setup wizard for first installation
 ├── db.php                # SQLite connection, migrations, webhooks, SMTP client & theming
+├── totp.php               # TOTP two-factor auth: crypto, enrollment, verification, config locking
+├── bin/
+│   ├── totp-reset-admin.php # Server-access-only emergency reset for a locked-out self-hosted admin
+│   └── check-translations.php # CI helper: keeps lang/*.php key sets in sync
+├── composer.json / composer.lock # TOTP dependencies (spomky-labs/otphp, endroid/qr-code)
+├── vendor/                # Composer dependencies (not committed — run `composer install`)
 ├── assets/fonts/         # Self-hosted webfonts (Fraunces, Inter, JetBrains Mono) for admin/editor
 ├── Dockerfile            # Container image definition
 ├── docker-compose.yaml   # Docker Compose setup for container operation
@@ -114,7 +121,7 @@ One Paragrafy instance can serve an unlimited number of projects, each with its 
 ├── WEBHOOKS.md           # Detailed webhook documentation, spec & payloads
 ├── paragrafy.svg         # Vector logo
 ├── .htaccess             # Apache routing & protection of sensitive files
-├── config.php            # Admin password hash & cron secret (generated during setup)
+├── config.php            # Admin password hash, cron secret & TOTP encryption key (generated during setup)
 ├── .env.local            # Optional: DEEPL_API_KEY fallback
 ├── backups/              # Rolling 7-day backups (created automatically)
 └── paragrafy_data.sqlite # SQLite database (created automatically)
