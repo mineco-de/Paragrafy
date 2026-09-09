@@ -75,6 +75,7 @@ Built for agencies, SaaS operators, and anyone who maintains legal pages for mor
 - **Login protection** — failed login attempts are throttled per IP address (5 attempts / 15 minutes) to slow down brute-force attacks.
 - **Optional Two-Factor Authentication (TOTP)** — any user account (and, self-hosted, the admin account) can enable RFC 6238 two-factor auth with QR-code setup and one-time recovery codes. See [Two-Factor Authentication (TOTP)](#-two-factor-authentication-totp) below.
 - **HTTP caching for public legal texts** — the public viewer and JSON API send `ETag`/`Last-Modified`/`Cache-Control` and answer unchanged requests with `304 Not Modified`, so a traffic spike on a linked customer site doesn't hit the database on every request. An optional per-project file cache skips full re-rendering entirely for documents that haven't changed; previews are always excluded and served `private, no-store`.
+- **Multilingual fallbacks** — if a visitor requests a language a document hasn't been translated into yet (e.g. `/fr/impressum` with only `DE`/`EN` published), the public viewer, JSON API, and overview page automatically fall back to English, then the project's primary language, then whichever single language exists — instead of a 404. The served page shows a clear notice with the requested language, the overview marks affected entries with a small language badge, and the JSON API adds `fallback: true` / `requested_lang` so integrations can detect it too.
 
 ---
 
@@ -281,7 +282,9 @@ GET https://legal.yourdomain.com/api/en/privacy-policy
 GET https://legal.yourdomain.com/api/terms-b2c
 ```
 
-Both this endpoint and the public HTML viewer send `ETag`/`Last-Modified`/`Cache-Control: public, max-age=300, must-revalidate` and honor `If-None-Match`/`If-Modified-Since` with `304 Not Modified` — so a caching HTTP client only re-fetches the body when a document actually changed.
+Both this endpoint and the public HTML viewer send `ETag`/`Last-Modified`/`Cache-Control: public, max-age=300, must-revalidate` and answer a matching `If-None-Match` with `304 Not Modified` — so a caching HTTP client only re-fetches the body when a document actually changed. (`Last-Modified` is sent for informational purposes but isn't accepted as a validator on its own — only `If-None-Match`/`ETag` can produce a `304`, since a language fallback response's freshness isn't reliably expressed by a date alone.)
+
+If a document isn't translated into the requested language yet, the response falls back to another available language instead of a `404` — see [Multilingual fallbacks](#-key-features) above. In that case the JSON response adds `"fallback": true` and `"requested_lang"` alongside the usual fields, and `"lang"` reflects the language actually served.
 
 ### In-app embed drawer (`/embed.js`)
 
