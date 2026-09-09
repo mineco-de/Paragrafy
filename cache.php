@@ -40,12 +40,14 @@ function public_cache_deploy_ts(): int {
 /**
  * Baut den ETag fuer ein oeffentlich ausgeliefertes Dokument. Fliessen ein:
  * PARAGRAFY_VERSION (ein Deploy mit geaendertem Rendering invalidiert automatisch alle
- * bisherigen ETags) sowie $projectUpdatedAt (Projekt-Stammdaten wie Firmenname/Adresse/
- * Branding werden per replace_placeholders() bzw. direkt ins Template eingebettet -
- * ohne diesen Wert wuerde eine Aenderung dieser Felder den Cache nicht invalidieren).
+ * bisherigen ETags) sowie projects.settings_version (Projekt-Stammdaten wie Firmenname/
+ * Adresse/Branding werden per replace_placeholders() bzw. direkt ins Template eingebettet).
+ * settings_version ist ein bei jedem UPDATE monoton hochgezaehlter Zaehler statt (nur) ein
+ * DATETIME, damit zwei Aenderungen innerhalb derselben Sekunde (CURRENT_TIMESTAMP hat nur
+ * Sekundenaufloesung in SQLite) trotzdem unterschiedliche Cache-Identitaeten erzeugen.
  */
-function build_public_cache_etag(int $projectId, string $lang, string $slug, string $updatedAt, string $projectUpdatedAt): string {
-    $hash = sha1($projectId . '|' . $lang . '|' . $slug . '|' . $updatedAt . '|' . $projectUpdatedAt . '|' . PARAGRAFY_VERSION);
+function build_public_cache_etag(int $projectId, string $lang, string $slug, string $updatedAt, int $projectSettingsVersion): string {
+    $hash = sha1($projectId . '|' . $lang . '|' . $slug . '|' . $updatedAt . '|' . $projectSettingsVersion . '|' . PARAGRAFY_VERSION);
     return '"' . $hash . '"';
 }
 
@@ -53,7 +55,9 @@ function build_public_cache_etag(int $projectId, string $lang, string $slug, str
  * SQLite CURRENT_TIMESTAMP liefert UTC ("YYYY-MM-DD HH:MM:SS"). Last-Modified ist das
  * juengste der drei Freshness-Signale (Dokument-Update, Projekt-Stammdaten-Update,
  * Code-Deploy), damit ein reiner If-Modified-Since-Vergleich (ohne ETag) keinen Fall
- * uebersieht, den der ETag bereits abdeckt.
+ * uebersieht, den der ETag bereits abdeckt. Bei zwei Aenderungen innerhalb derselben
+ * Sekunde bleibt Last-Modified unveraendert (Sekundenaufloesung) - die eigentliche
+ * Cache-Trennung uebernimmt in dem Fall settings_version im ETag (s.o.).
  */
 function build_public_last_modified(string $updatedAtSql, string $projectUpdatedAtSql = ''): int {
     $docTs = strtotime($updatedAtSql . ' UTC') ?: 0;

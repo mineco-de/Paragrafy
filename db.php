@@ -247,7 +247,8 @@ function ensure_schema_migrations(PDO $pdo): void {
                 'consent_log_retention_days' => "INTEGER DEFAULT 1095",
                 'ai_provider' => "TEXT DEFAULT ''",
                 'ai_api_key' => "TEXT DEFAULT ''",
-                'settings_updated_at' => "DATETIME DEFAULT CURRENT_TIMESTAMP"
+                'settings_updated_at' => "DATETIME DEFAULT CURRENT_TIMESTAMP",
+                'settings_version' => "INTEGER NOT NULL DEFAULT 1"
             ];
             foreach ($newCols as $c => $type) {
                 if (!in_array($c, $colNames)) {
@@ -1154,6 +1155,7 @@ function update_project_company_fields(PDO $db, int $projectId, array $fields): 
         return;
     }
     $sets[] = "settings_updated_at = CURRENT_TIMESTAMP";
+    $sets[] = "settings_version = settings_version + 1";
     $params[] = $projectId;
     $stmt = $db->prepare("UPDATE projects SET " . implode(', ', $sets) . " WHERE id = ?");
     $stmt->execute($params);
@@ -2143,6 +2145,7 @@ function export_project_backup(PDO $db, int $projectId): array {
                 company_name TEXT DEFAULT '', address TEXT DEFAULT '', email TEXT DEFAULT '',
                 phone TEXT DEFAULT '', representative TEXT DEFAULT '', register_info TEXT DEFAULT '',
                 settings_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                settings_version INTEGER NOT NULL DEFAULT 1,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE doc_types (
