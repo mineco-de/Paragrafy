@@ -1154,7 +1154,11 @@ function update_project_company_fields(PDO $db, int $projectId, array $fields): 
     if (empty($sets)) {
         return;
     }
-    $sets[] = "settings_updated_at = CURRENT_TIMESTAMP";
+    // Strikt hochzaehlen statt CURRENT_TIMESTAMP (s. admin.php-Settings-Save fuer die
+    // ausfuehrliche Begruendung): verhindert, dass zwei Projekt-Updates in derselben Sekunde
+    // (z. B. Einlesemodus direkt gefolgt von einem manuellen Admin-Save) denselben
+    // Last-Modified-Wert erzeugen.
+    $sets[] = "settings_updated_at = CASE WHEN datetime('now') > settings_updated_at THEN datetime('now') ELSE datetime(settings_updated_at, '+1 second') END";
     $sets[] = "settings_version = settings_version + 1";
     $params[] = $projectId;
     $stmt = $db->prepare("UPDATE projects SET " . implode(', ', $sets) . " WHERE id = ?");

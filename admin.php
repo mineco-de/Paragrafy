@@ -522,6 +522,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $isManagedCloud = !empty(get_config()['managed_cloud']);
         $domainToSave = $isManagedCloud ? $project['domain'] : $_POST['domain'];
 
+        // settings_updated_at wird bewusst nicht per CURRENT_TIMESTAMP gesetzt, sondern strikt
+        // hochgezaehlt (+1s statt Gleichstand), damit Last-Modified/If-Modified-Since bei zwei
+        // Aenderungen innerhalb derselben Sekunde nicht auf denselben Wert kollabiert -- siehe
+        // cache.php (build_public_last_modified) und update_project_company_fields() in db.php,
+        // die dasselbe Muster fahren.
         $stmt = $db->prepare("
             UPDATE projects SET
                 name=?, domain=?, brand_color=?, primary_lang=?, active_languages=?,
@@ -529,7 +534,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 smtp_host=?, smtp_port=?, smtp_user=?, smtp_pass=?, smtp_secure=?, smtp_from=?, audit_email_recipient=?,
                 cookie_banner_enabled=?, cookie_banner_text=?, consent_logging_enabled=?, consent_log_retention_days=?,
                 company_name=?, address=?, email=?, phone=?, representative=?, register_info=?,
-                settings_updated_at=CURRENT_TIMESTAMP, settings_version=settings_version + 1
+                settings_updated_at=CASE WHEN datetime('now') > settings_updated_at THEN datetime('now') ELSE datetime(settings_updated_at, '+1 second') END,
+                settings_version=settings_version + 1
             WHERE id=?
         ");
         $stmt->execute([
