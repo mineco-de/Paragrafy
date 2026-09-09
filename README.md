@@ -74,6 +74,7 @@ Built for agencies, SaaS operators, and anyone who maintains legal pages for mor
 - **Dark mode** — light/dark/auto toggle in settings, stored per browser, with no effect on other users or public legal pages.
 - **Login protection** — failed login attempts are throttled per IP address (5 attempts / 15 minutes) to slow down brute-force attacks.
 - **Optional Two-Factor Authentication (TOTP)** — any user account (and, self-hosted, the admin account) can enable RFC 6238 two-factor auth with QR-code setup and one-time recovery codes. See [Two-Factor Authentication (TOTP)](#-two-factor-authentication-totp) below.
+- **HTTP caching for public legal texts** — the public viewer and JSON API send `ETag`/`Last-Modified`/`Cache-Control` and answer unchanged requests with `304 Not Modified`, so a traffic spike on a linked customer site doesn't hit the database on every request. An optional per-project file cache skips full re-rendering entirely for documents that haven't changed; previews are always excluded and served `private, no-store`.
 
 ---
 
@@ -202,7 +203,7 @@ Open your subdomain in the browser (e.g. `https://legal.yourdomain.com`). The **
 
 ## ⏱️ Cron Jobs
 
-Four endpoints should be called regularly from outside so scheduled publications go live, backups are created, and webhooks get delivered. All four are protected by a secret key (`?secret=...` query parameter), which you'll find pre-assembled under **Settings → Automation (Cron)** — and can regenerate there if needed.
+These endpoints should be called regularly from outside so scheduled publications go live, backups are created, and webhooks get delivered. All are protected by a secret key (`?secret=...` query parameter), which you'll find pre-assembled under **Settings → Automation (Cron)** — and can regenerate there if needed.
 
 ```bash
 # Publish scheduled changes (every minute, across all projects)
@@ -216,6 +217,9 @@ Four endpoints should be called regularly from outside so scheduled publications
 
 # Email audit report if any legal texts are overdue (daily)
 0 8 * * * curl -fsS "https://legal.yourdomain.com/api/cron/audit?secret=YOUR_CRON_SECRET" > /dev/null
+
+# Optional: rotate old public file-cache entries (the cache also rotates itself opportunistically)
+0 4 * * * curl -fsS "https://legal.yourdomain.com/api/cron/cache-cleanup?secret=YOUR_CRON_SECRET" > /dev/null
 ```
 
 An external uptime monitor (e.g. Uptime Kuma, healthchecks.io) works just as well as a "cron" here, as long as it calls these URLs on the desired interval.
@@ -235,6 +239,7 @@ Only the following values actually come from files instead of the database:
 | `config.php` (auto-generated) | Admin password hash (legacy login) and the cron secret. Created by the setup wizard — don't edit manually. Optional: `project_limit` (int) caps the number of `projects` rows for this instance; if unset (default), there's no limit. Useful for operators running Paragrafy behind their own SaaS/billing layer with one instance per account/plan. Also self-heals a `totp_encryption_key` (random, generated on first TOTP setup, same pattern as the cron secret) used to encrypt TOTP secrets at rest — never edit or share this value, it's not a secret you're meant to configure. On self-hosted instances (no `sso_secret`), also holds the admin account's own optional `admin_totp_*` fields if 2FA is enabled for it — see [Two-Factor Authentication (TOTP)](#-two-factor-authentication-totp) below. |
 | `.env` / `.env.local` (optional) | `DEEPL_API_KEY=...` as a cross-project fallback if a project has no DeepL key of its own configured. Both files are optional — everything works without them except this fallback. |
 | `PARAGRAFY_DATA_DIR` (env variable) | Docker only: relocates `config.php`, the SQLite database, `/backups`, and `.env.local` into a persistent directory. See [Getting Started](#-getting-started) above. |
+| `PARAGRAFY_PUBLIC_CACHE` (env variable, optional) | Set to `0` to disable the optional public file-cache under `PARAGRAFY_DATA_DIR/cache/public/` (defaults to `1`/on). HTTP validation caching (`ETag`/`Last-Modified`/`304`) is unaffected and always active. |
 
 ---
 
@@ -275,6 +280,8 @@ Full payloads, HMAC signature verification, and code examples: **[WEBHOOKS.md](W
 GET https://legal.yourdomain.com/api/en/privacy-policy
 GET https://legal.yourdomain.com/api/terms-b2c
 ```
+
+Both this endpoint and the public HTML viewer send `ETag`/`Last-Modified`/`Cache-Control: public, max-age=300, must-revalidate` and honor `If-None-Match`/`If-Modified-Since` with `304 Not Modified` — so a caching HTTP client only re-fetches the body when a document actually changed.
 
 ### In-app embed drawer (`/embed.js`)
 
