@@ -1125,7 +1125,15 @@ if (isset($_POST['action']) && $_POST['action'] === 'totp_setup_confirm') {
         exit;
     }
     $recoveryCodes = totp_generate_recovery_codes();
-    totp_identity_complete_setup($db, $identity, totp_encrypt_secret($pendingSecret), totp_hash_recovery_codes($recoveryCodes));
+    if (!totp_identity_complete_setup($db, $identity, totp_encrypt_secret($pendingSecret), totp_hash_recovery_codes($recoveryCodes))) {
+        // Write failed to persist -- do NOT show recovery codes or log
+        // "enabled": nothing was actually saved, so telling the user
+        // otherwise would make them believe the account is protected when
+        // it isn't. Leave $_SESSION['totp_setup']['secret'] in place so they
+        // can simply retry the confirmation.
+        header("Location: /admin/security?project_id=$projectId&msg=totp_setup_persist_failed");
+        exit;
+    }
     $_SESSION['totp_setup'] = ['recovery_codes' => $recoveryCodes];
     log_audit(null, '', t('admin.security.audit.totp_enabled', ['who' => $identity['type'] === 'user' ? $identity['row']['email'] : 'Admin']));
     header("Location: /admin/security?project_id=$projectId");
@@ -1145,7 +1153,10 @@ if (isset($_POST['action']) && $_POST['action'] === 'totp_regenerate_codes') {
         exit;
     }
     $recoveryCodes = totp_generate_recovery_codes();
-    totp_identity_replace_recovery_codes($db, $identity, totp_hash_recovery_codes($recoveryCodes));
+    if (!totp_identity_replace_recovery_codes($db, $identity, totp_hash_recovery_codes($recoveryCodes))) {
+        header("Location: /admin/security?project_id=$projectId&msg=totp_setup_persist_failed");
+        exit;
+    }
     $_SESSION['totp_setup'] = ['recovery_codes' => $recoveryCodes];
     log_audit(null, '', t('admin.security.audit.totp_codes_regenerated', ['who' => $identity['type'] === 'user' ? $identity['row']['email'] : 'Admin']));
     header("Location: /admin/security?project_id=$projectId");
@@ -1156,7 +1167,10 @@ if (isset($_POST['action']) && $_POST['action'] === 'totp_disable') {
     $identity = totp_current_identity($db);
     $pass = $_POST['confirm_password'] ?? '';
     if ($identity !== null && totp_identity_enabled($identity) && $pass !== '' && password_verify($pass, totp_identity_password_hash($identity, $config))) {
-        totp_identity_disable($db, $identity);
+        if (!totp_identity_disable($db, $identity)) {
+            header("Location: /admin/security?project_id=$projectId&msg=totp_setup_persist_failed");
+            exit;
+        }
         unset($_SESSION['totp_setup']);
         log_audit(null, '', t('admin.security.audit.totp_disabled', ['who' => $identity['type'] === 'user' ? $identity['row']['email'] : 'Admin']));
         header("Location: /admin/security?project_id=$projectId&msg=totp_disabled");
@@ -2645,6 +2659,7 @@ function render_security_view(PDO $db, array $project, array $projects): void {
         'totp_enabled' => ['ok', t('admin.security.msg.enabled')],
         'totp_disabled' => ['ok', t('admin.security.msg.disabled')],
         'totp_disable_wrong_password' => ['err', t('admin.security.msg.wrong_password')],
+        'totp_setup_persist_failed' => ['err', t('admin.security.msg.persist_failed')],
     ];
 
     $qrDataUri = null;

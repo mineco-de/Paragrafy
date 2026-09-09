@@ -39,7 +39,10 @@ if (empty($config['admin_totp_enabled_at'])) {
     exit(0);
 }
 
-totp_identity_disable(get_db(), ['type' => 'admin']);
+if (!totp_identity_disable(get_db(), ['type' => 'admin'])) {
+    fwrite(STDERR, "Failed to write config.php -- check that " . PARAGRAFY_DATA_DIR . " is writable by this process and try again. Nothing was changed.\n");
+    exit(1);
+}
 
 log_audit(null, '', 'Admin-TOTP per CLI-Notfallzugriff zurueckgesetzt (bin/totp-reset-admin.php)');
 

@@ -350,6 +350,7 @@ return [
     'admin.security.msg.enabled' => 'Two-factor authentication enabled.',
     'admin.security.msg.disabled' => 'Two-factor authentication disabled.',
     'admin.security.msg.wrong_password' => 'Wrong password.',
+    'admin.security.msg.persist_failed' => 'The change could not be saved. Please try again.',
     'admin.security.audit.totp_enabled' => 'TOTP enabled for :who',
     'admin.security.audit.totp_disabled' => 'TOTP disabled for :who',
     'admin.security.audit.totp_codes_regenerated' => 'TOTP recovery codes regenerated for :who',

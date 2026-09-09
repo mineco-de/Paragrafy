@@ -375,6 +375,7 @@ return [
     'admin.security.msg.enabled' => 'Zwei-Faktor-Authentifizierung aktiviert.',
     'admin.security.msg.disabled' => 'Zwei-Faktor-Authentifizierung deaktiviert.',
     'admin.security.msg.wrong_password' => 'Falsches Passwort.',
+    'admin.security.msg.persist_failed' => 'Änderung konnte nicht gespeichert werden. Bitte erneut versuchen.',
     'admin.security.audit.totp_enabled' => 'TOTP aktiviert für :who',
     'admin.security.audit.totp_disabled' => 'TOTP deaktiviert für :who',
     'admin.security.audit.totp_codes_regenerated' => 'TOTP-Recovery-Codes neu generiert für :who',
