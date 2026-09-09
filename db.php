@@ -106,19 +106,23 @@ function update_config(callable $mutator): ?array {
         // case) -- fall back to a best-effort, non-atomic write rather than
         // hard-failing the whole request.
         $config = $mutator(get_config());
-        if ($config === null) {
+        if ($config === null || !write_config($config)) {
             return null;
         }
-        write_config($config);
         return $config;
     }
     try {
         $config = file_exists(CONFIG_FILE) ? (require CONFIG_FILE) : [];
         $config = $mutator($config);
-        if ($config === null) {
+        // A caller like totp_consume_for_admin_login() only trusts the
+        // one-time factor as consumed once update_config() returns non-null
+        // -- if the write itself fails (disk full, permissions), treat the
+        // whole mutation as if it never happened rather than letting the
+        // caller finalize a session/state change that never made it to disk
+        // (which would make the same code replayable on the next request).
+        if ($config === null || !write_config($config)) {
             return null;
         }
-        write_config($config);
         return $config;
     } finally {
         flock($lockHandle, LOCK_UN);
@@ -126,14 +130,18 @@ function update_config(callable $mutator): ?array {
     }
 }
 
-function write_config(array $config): void {
+/** Returns false (without throwing) if the write itself failed, so callers -- especially update_config() -- can refuse to treat an unpersisted mutation as having happened. */
+function write_config(array $config): bool {
     if (!is_dir(PARAGRAFY_DATA_DIR)) {
         mkdir(PARAGRAFY_DATA_DIR, 0755, true);
     }
     $content = "<?php\nreturn " . var_export($config, true) . ";\n";
-    file_put_contents(CONFIG_FILE, $content);
+    if (file_put_contents(CONFIG_FILE, $content) === false) {
+        return false;
+    }
     $cache = &config_cache_ref();
     $cache = $config;
+    return true;
 }
 
 /** Returns the shared secret for the /api/cron/* endpoints, generating one on first use (self-healing for installs from before this existed). */
@@ -146,10 +154,16 @@ function ensure_cron_secret(): string {
 }
 
 function regenerate_cron_secret(): string {
-    $config = get_config();
     $secret = bin2hex(random_bytes(32));
-    $config['cron_secret'] = $secret;
-    write_config($config);
+    // Goes through update_config() (not a bare get_config()+write_config())
+    // so this can't race with a concurrent TOTP config mutation (e.g. an
+    // admin login consuming a TOTP step) and silently clobber it or get
+    // clobbered by it -- both now serialize on the same config.php lock.
+    update_config(function (?array $config) use ($secret): array {
+        $config = $config ?? [];
+        $config['cron_secret'] = $secret;
+        return $config;
+    });
     return $secret;
 }
 

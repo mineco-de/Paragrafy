@@ -335,7 +335,7 @@ function totp_consume_for_user_login(PDO $db, array $user, string $input): bool 
  */
 function totp_consume_for_admin_login(string $input): bool {
     $accepted = false;
-    update_config(function (?array $config) use ($input, &$accepted): ?array {
+    $result = update_config(function (?array $config) use ($input, &$accepted): ?array {
         $config = $config ?? [];
         $plainSecret = totp_decrypt_secret($config['admin_totp_secret'] ?? null);
         if ($plainSecret !== null) {
@@ -355,5 +355,13 @@ function totp_consume_for_admin_login(string $input): bool {
         }
         return null; // nothing matched -- abort, don't touch the file
     });
-    return $accepted;
+    // update_config() returns null both when the mutator declined (nothing
+    // matched -- $accepted stays false, consistent) and when it matched but
+    // the write itself failed to reach disk -- in that second case $accepted
+    // was already flipped true above, so it alone isn't a safe signal that
+    // the one-time factor was actually, durably consumed. Require both: a
+    // match AND a confirmed write, otherwise the caller must not finalize an
+    // authenticated session for a "consumption" that never persisted (the
+    // same code would still validate again on the next attempt).
+    return $accepted && $result !== null;
 }
