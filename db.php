@@ -1153,6 +1153,7 @@ function update_project_company_fields(PDO $db, int $projectId, array $fields): 
     if (empty($sets)) {
         return;
     }
+    $sets[] = "settings_updated_at = CURRENT_TIMESTAMP";
     $params[] = $projectId;
     $stmt = $db->prepare("UPDATE projects SET " . implode(', ', $sets) . " WHERE id = ?");
     $stmt->execute($params);
