@@ -81,8 +81,17 @@ function build_public_last_modified(string $updatedAtSql, string $projectUpdated
  * aus. Setzt IMMER zuerst ETag/Last-Modified/Cache-Control (auch bei 304 laut RFC
  * 7232 Sec. 4.1 vorgeschrieben). Bei Match wird der 304-Status gesetzt und true
  * zurueckgegeben - der Aufrufer muss dann selbst exit/return ohne Body ausloesen.
+ *
+ * $allowLastModifiedOnly=false deaktiviert den If-Modified-Since-Zweig komplett (nur
+ * If-None-Match/ETag kann dann noch 304 ausloesen). Wird bei Sprach-Fallback-Antworten
+ * genutzt: die aufgeloeste Uebersetzung kann sich zwischen zwei Requests aendern (z. B.
+ * wenn das bisher per Fallback gewaehlte Dokument depubliziert wird), ohne dass sich der
+ * Last-Modified-Wert zwingend nach vorne bewegt (Sekundenaufloesung, mehrere Freshness-
+ * Signale). Der ETag deckt diesen Fall bereits zuverlaessig ab (enthaelt translations.id),
+ * ein reiner Datums-Vergleich ohne ETag-Unterstuetzung aber nicht -- also lieber einmal zu
+ * oft frisch rendern als faelschlich 304 auf bereits ueberholten Fallback-Content liefern.
  */
-function check_conditional_request(string $etag, int $lastModifiedTs, int $maxAge = PUBLIC_CACHE_MAX_AGE_SECONDS): bool {
+function check_conditional_request(string $etag, int $lastModifiedTs, int $maxAge = PUBLIC_CACHE_MAX_AGE_SECONDS, bool $allowLastModifiedOnly = true): bool {
     header('ETag: ' . $etag);
     header('Last-Modified: ' . gmdate('D, d M Y H:i:s', $lastModifiedTs) . ' GMT');
     header('Cache-Control: public, max-age=' . $maxAge . ', must-revalidate');
@@ -107,7 +116,7 @@ function check_conditional_request(string $etag, int $lastModifiedTs, int $maxAg
     }
 
     $ifModifiedSince = $_SERVER['HTTP_IF_MODIFIED_SINCE'] ?? '';
-    if ($ifModifiedSince !== '') {
+    if ($allowLastModifiedOnly && $ifModifiedSince !== '') {
         $since = strtotime($ifModifiedSince);
         if ($since !== false && $lastModifiedTs <= $since) {
             http_response_code(304);
