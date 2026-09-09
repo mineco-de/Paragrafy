@@ -39,8 +39,7 @@ if (empty($config['admin_totp_enabled_at'])) {
     exit(0);
 }
 
-unset($config['admin_totp_secret'], $config['admin_totp_enabled_at'], $config['admin_totp_recovery_codes'], $config['admin_totp_last_used_step']);
-write_config($config);
+totp_identity_disable(get_db(), ['type' => 'admin']);
 
 log_audit(null, '', 'Admin-TOTP per CLI-Notfallzugriff zurueckgesetzt (bin/totp-reset-admin.php)');
 

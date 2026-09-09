@@ -1079,49 +1079,18 @@ function handle_totp_verify(PDO $db): ?string {
 }
 
 function totp_finish_user_login(PDO $db, array $user, string $input): bool {
-    $plainSecret = totp_decrypt_secret($user['totp_secret'] ?? null);
-    if ($plainSecret !== null) {
-        $lastStep = $user['totp_last_used_step'] !== null ? (int)$user['totp_last_used_step'] : null;
-        $step = totp_verify_and_consume($plainSecret, $input, $lastStep);
-        if ($step !== null) {
-            $db->prepare("UPDATE users SET totp_last_used_step = ? WHERE id = ?")->execute([$step, $user['id']]);
-            finalize_user_session($user);
-            return true;
-        }
-    }
-
-    $remaining = totp_consume_recovery_code($user['totp_recovery_codes'] ?? null, $input);
-    if ($remaining !== null) {
-        $db->prepare("UPDATE users SET totp_recovery_codes = ? WHERE id = ?")->execute([$remaining, $user['id']]);
+    if (totp_consume_for_user_login($db, $user, $input)) {
         finalize_user_session($user);
         return true;
     }
-
     return false;
 }
 
 function totp_finish_admin_login(string $input): bool {
-    $config = get_config();
-    $plainSecret = totp_decrypt_secret($config['admin_totp_secret'] ?? null);
-    if ($plainSecret !== null) {
-        $lastStep = isset($config['admin_totp_last_used_step']) ? (int)$config['admin_totp_last_used_step'] : null;
-        $step = totp_verify_and_consume($plainSecret, $input, $lastStep);
-        if ($step !== null) {
-            $config['admin_totp_last_used_step'] = $step;
-            write_config($config);
-            finalize_admin_session();
-            return true;
-        }
-    }
-
-    $remaining = totp_consume_recovery_code($config['admin_totp_recovery_codes'] ?? null, $input);
-    if ($remaining !== null) {
-        $config['admin_totp_recovery_codes'] = $remaining;
-        write_config($config);
+    if (totp_consume_for_admin_login($input)) {
         finalize_admin_session();
         return true;
     }
-
     return false;
 }
 
@@ -1155,9 +1124,8 @@ if (isset($_POST['action']) && $_POST['action'] === 'totp_setup_confirm') {
         header("Location: /admin/security?project_id=$projectId&msg=totp_setup_invalid_code");
         exit;
     }
-    totp_identity_persist_secret($db, $identity, totp_encrypt_secret($pendingSecret));
     $recoveryCodes = totp_generate_recovery_codes();
-    totp_identity_persist_recovery_codes($db, $identity, totp_hash_recovery_codes($recoveryCodes));
+    totp_identity_complete_setup($db, $identity, totp_encrypt_secret($pendingSecret), totp_hash_recovery_codes($recoveryCodes));
     $_SESSION['totp_setup'] = ['recovery_codes' => $recoveryCodes];
     log_audit(null, '', t('admin.security.audit.totp_enabled', ['who' => $identity['type'] === 'user' ? $identity['row']['email'] : 'Admin']));
     header("Location: /admin/security?project_id=$projectId");
@@ -1177,7 +1145,7 @@ if (isset($_POST['action']) && $_POST['action'] === 'totp_regenerate_codes') {
         exit;
     }
     $recoveryCodes = totp_generate_recovery_codes();
-    totp_identity_persist_recovery_codes($db, $identity, totp_hash_recovery_codes($recoveryCodes));
+    totp_identity_replace_recovery_codes($db, $identity, totp_hash_recovery_codes($recoveryCodes));
     $_SESSION['totp_setup'] = ['recovery_codes' => $recoveryCodes];
     log_audit(null, '', t('admin.security.audit.totp_codes_regenerated', ['who' => $identity['type'] === 'user' ? $identity['row']['email'] : 'Admin']));
     header("Location: /admin/security?project_id=$projectId");

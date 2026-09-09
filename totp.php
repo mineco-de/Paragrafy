@@ -44,9 +44,20 @@ function ensure_totp_encryption_key(): string {
     if (!empty($config['totp_encryption_key'])) {
         return $config['totp_encryption_key'];
     }
-    $config['totp_encryption_key'] = base64_encode(random_bytes(SODIUM_CRYPTO_SECRETBOX_KEYBYTES));
-    write_config($config);
-    return $config['totp_encryption_key'];
+    // Slow path only: two concurrent first-ever TOTP setups could otherwise
+    // both generate a different key and race to write config.php, leaving
+    // whichever secret was encrypted under the losing key undecryptable.
+    // update_config() re-checks emptiness *inside* the lock (double-checked
+    // locking) so the second racer just reuses the first one's key instead
+    // of generating and writing its own.
+    $result = update_config(function (?array $config): array {
+        $config = $config ?? [];
+        if (empty($config['totp_encryption_key'])) {
+            $config['totp_encryption_key'] = base64_encode(random_bytes(SODIUM_CRYPTO_SECRETBOX_KEYBYTES));
+        }
+        return $config;
+    });
+    return $result['totp_encryption_key'];
 }
 
 /** Encrypts a plaintext Base32 TOTP secret for storage (totp_secret column / config field). */
@@ -226,27 +237,41 @@ function totp_identity_password_hash(array $identity, array $config): string {
     return $identity['type'] === 'user' ? (string)($identity['row']['password_hash'] ?? '') : (string)($config['admin_password_hash'] ?? '');
 }
 
-function totp_identity_persist_secret(PDO $db, array $identity, string $encryptedSecret): void {
+/**
+ * Persists a freshly confirmed TOTP enrollment -- secret AND recovery codes
+ * together, in one write. Doing this as two separate writes (as an earlier
+ * version of this code did) leaves a window where a crashed/conflicting
+ * request in between them has already set totp_enabled_at (TOTP now
+ * mandatory at login) with no recovery codes saved yet, locking the account
+ * out of its own promised fallback.
+ */
+function totp_identity_complete_setup(PDO $db, array $identity, string $encryptedSecret, string $hashedRecoveryCodesJson): void {
     if ($identity['type'] === 'user') {
-        $db->prepare("UPDATE users SET totp_secret = ?, totp_enabled_at = CURRENT_TIMESTAMP, totp_last_used_step = NULL WHERE id = ?")
-            ->execute([$encryptedSecret, $identity['row']['id']]);
+        $db->prepare("UPDATE users SET totp_secret = ?, totp_enabled_at = CURRENT_TIMESTAMP, totp_last_used_step = NULL, totp_recovery_codes = ? WHERE id = ?")
+            ->execute([$encryptedSecret, $hashedRecoveryCodesJson, $identity['row']['id']]);
         return;
     }
-    $config = get_config();
-    $config['admin_totp_secret'] = $encryptedSecret;
-    $config['admin_totp_enabled_at'] = date('c');
-    $config['admin_totp_last_used_step'] = null;
-    write_config($config);
+    update_config(function (?array $config) use ($encryptedSecret, $hashedRecoveryCodesJson): array {
+        $config = $config ?? [];
+        $config['admin_totp_secret'] = $encryptedSecret;
+        $config['admin_totp_enabled_at'] = date('c');
+        $config['admin_totp_last_used_step'] = null;
+        $config['admin_totp_recovery_codes'] = $hashedRecoveryCodesJson;
+        return $config;
+    });
 }
 
-function totp_identity_persist_recovery_codes(PDO $db, array $identity, string $hashedJson): void {
+/** Standalone recovery-code regeneration for an already-enabled identity (no partial-enrollment window since TOTP is already fully set up either way). */
+function totp_identity_replace_recovery_codes(PDO $db, array $identity, string $hashedJson): void {
     if ($identity['type'] === 'user') {
         $db->prepare("UPDATE users SET totp_recovery_codes = ? WHERE id = ?")->execute([$hashedJson, $identity['row']['id']]);
         return;
     }
-    $config = get_config();
-    $config['admin_totp_recovery_codes'] = $hashedJson;
-    write_config($config);
+    update_config(function (?array $config) use ($hashedJson): array {
+        $config = $config ?? [];
+        $config['admin_totp_recovery_codes'] = $hashedJson;
+        return $config;
+    });
 }
 
 function totp_identity_disable(PDO $db, array $identity): void {
@@ -255,7 +280,80 @@ function totp_identity_disable(PDO $db, array $identity): void {
             ->execute([$identity['row']['id']]);
         return;
     }
-    $config = get_config();
-    unset($config['admin_totp_secret'], $config['admin_totp_enabled_at'], $config['admin_totp_recovery_codes'], $config['admin_totp_last_used_step']);
-    write_config($config);
+    update_config(function (?array $config): array {
+        $config = $config ?? [];
+        unset($config['admin_totp_secret'], $config['admin_totp_enabled_at'], $config['admin_totp_recovery_codes'], $config['admin_totp_last_used_step']);
+        return $config;
+    });
+}
+
+/**
+ * Atomically consumes one TOTP step or recovery code for a user account's
+ * login, returning true only if this request actually won the race to
+ * consume it. Uses a compare-and-swap UPDATE (WHERE clause re-checks the
+ * current DB state, not the snapshot read earlier) instead of an
+ * unconditional UPDATE, so two concurrent logins submitting the same
+ * still-valid code can no longer both succeed -- the loser's UPDATE affects
+ * zero rows and is treated as an invalid code.
+ */
+function totp_consume_for_user_login(PDO $db, array $user, string $input): bool {
+    $plainSecret = totp_decrypt_secret($user['totp_secret'] ?? null);
+    if ($plainSecret !== null) {
+        $lastStep = $user['totp_last_used_step'] !== null ? (int)$user['totp_last_used_step'] : null;
+        $step = totp_verify_and_consume($plainSecret, $input, $lastStep);
+        if ($step !== null) {
+            $stmt = $db->prepare("UPDATE users SET totp_last_used_step = ? WHERE id = ? AND (totp_last_used_step IS NULL OR totp_last_used_step < ?)");
+            $stmt->execute([$step, $user['id'], $step]);
+            if ($stmt->rowCount() === 1) {
+                return true;
+            }
+            // Lost the race (or the code replays a step someone else just
+            // consumed) -- fall through and try the recovery-code path below,
+            // exactly as if the TOTP code itself hadn't matched.
+        }
+    }
+
+    $stored = $user['totp_recovery_codes'] ?? null;
+    $remaining = totp_consume_recovery_code($stored, $input);
+    if ($remaining !== null) {
+        $stmt = $db->prepare("UPDATE users SET totp_recovery_codes = ? WHERE id = ? AND totp_recovery_codes = ?");
+        $stmt->execute([$remaining, $user['id'], $stored]);
+        if ($stmt->rowCount() === 1) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * Admin-account equivalent of totp_consume_for_user_login() -- the whole
+ * check-and-set happens inside one update_config() lock instead of a CAS
+ * retry, since config.php has no per-row compare-and-swap primitive the way
+ * a SQL UPDATE ... WHERE does. Returns true only if this call actually
+ * consumed the step/code.
+ */
+function totp_consume_for_admin_login(string $input): bool {
+    $accepted = false;
+    update_config(function (?array $config) use ($input, &$accepted): ?array {
+        $config = $config ?? [];
+        $plainSecret = totp_decrypt_secret($config['admin_totp_secret'] ?? null);
+        if ($plainSecret !== null) {
+            $lastStep = isset($config['admin_totp_last_used_step']) ? (int)$config['admin_totp_last_used_step'] : null;
+            $step = totp_verify_and_consume($plainSecret, $input, $lastStep);
+            if ($step !== null) {
+                $config['admin_totp_last_used_step'] = $step;
+                $accepted = true;
+                return $config;
+            }
+        }
+        $remaining = totp_consume_recovery_code($config['admin_totp_recovery_codes'] ?? null, $input);
+        if ($remaining !== null) {
+            $config['admin_totp_recovery_codes'] = $remaining;
+            $accepted = true;
+            return $config;
+        }
+        return null; // nothing matched -- abort, don't touch the file
+    });
+    return $accepted;
 }

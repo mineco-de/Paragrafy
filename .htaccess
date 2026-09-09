@@ -20,6 +20,9 @@
     <Files "config.php">
         Require all denied
     </Files>
+    <Files "config.lock">
+        Require all denied
+    </Files>
     <FilesMatch "^\.env">
         Require all denied
     </FilesMatch>
@@ -30,6 +33,10 @@
         Deny from all
     </FilesMatch>
     <Files "config.php">
+        Order allow,deny
+        Deny from all
+    </Files>
+    <Files "config.lock">
         Order allow,deny
         Deny from all
     </Files>

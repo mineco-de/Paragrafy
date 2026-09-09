@@ -80,6 +80,52 @@ function get_config(): array {
  * the second write_config() could start from a get_config() that still
  * reflects the pre-first-write state and overwrite it.
  */
+/**
+ * Atomic read-modify-write for config.php: holds an exclusive file lock for
+ * the entire cycle, so two concurrent requests mutating config.php (e.g. two
+ * logins racing to consume the same admin TOTP step/recovery code, or two
+ * first-time TOTP setups racing to generate totp_encryption_key) can't
+ * interleave their get_config()+write_config() calls and clobber each
+ * other's write -- unlike two independent get_config()/write_config() calls,
+ * which are each individually consistent but not atomic as a pair.
+ *
+ * $mutator receives the current config (freshly read from disk under the
+ * lock, ignoring the in-process cache to guarantee it reflects any write
+ * another process made) and returns the new config to persist, or null to
+ * abort without writing (e.g. "the code was already consumed by someone
+ * else, don't touch the file"). Returns the written config, or null if the
+ * mutator aborted.
+ */
+function update_config(callable $mutator): ?array {
+    if (!is_dir(PARAGRAFY_DATA_DIR)) {
+        mkdir(PARAGRAFY_DATA_DIR, 0755, true);
+    }
+    $lockHandle = fopen(PARAGRAFY_DATA_DIR . '/config.lock', 'c');
+    if ($lockHandle === false || !flock($lockHandle, LOCK_EX)) {
+        // Lock file couldn't be opened/locked (e.g. read-only filesystem edge
+        // case) -- fall back to a best-effort, non-atomic write rather than
+        // hard-failing the whole request.
+        $config = $mutator(get_config());
+        if ($config === null) {
+            return null;
+        }
+        write_config($config);
+        return $config;
+    }
+    try {
+        $config = file_exists(CONFIG_FILE) ? (require CONFIG_FILE) : [];
+        $config = $mutator($config);
+        if ($config === null) {
+            return null;
+        }
+        write_config($config);
+        return $config;
+    } finally {
+        flock($lockHandle, LOCK_UN);
+        fclose($lockHandle);
+    }
+}
+
 function write_config(array $config): void {
     if (!is_dir(PARAGRAFY_DATA_DIR)) {
         mkdir(PARAGRAFY_DATA_DIR, 0755, true);
