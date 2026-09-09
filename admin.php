@@ -59,32 +59,39 @@ if (isset($_POST['action']) && $_POST['action'] === 'login') {
         $email = $emailForRateLimit;
         $pass = $_POST['password'] ?? '';
         $loggedIn = false;
+        $totpPending = null;
 
         if ($email !== '') {
             $stmt = $db->prepare("SELECT * FROM users WHERE email = ? AND status = 'active'");
             $stmt->execute([$email]);
             $user = $stmt->fetch();
             if ($user && !empty($user['password_hash']) && password_verify($pass, $user['password_hash'])) {
-                session_regenerate_id(true);
-                $_SESSION['paragrafy_admin'] = true;
-                $_SESSION['paragrafy_user_id'] = (int)$user['id'];
-                $_SESSION['paragrafy_user_name'] = $user['name'];
-                $_SESSION['paragrafy_user_email'] = $user['email'];
-                $_SESSION['paragrafy_user_locale'] = $user['locale'] ?? 'de';
+                if (!empty($user['totp_enabled_at'])) {
+                    $totpPending = ['type' => 'user', 'user_id' => (int)$user['id'], 'started_at' => time()];
+                } else {
+                    finalize_user_session($user);
+                    $loggedIn = true;
+                }
+            }
+        } elseif (empty($config['admin_password_login_disabled']) && password_verify($pass, $config['admin_password_hash'] ?? '')) {
+            if (admin_totp_available() && admin_totp_enabled()) {
+                $totpPending = ['type' => 'admin', 'started_at' => time()];
+            } else {
+                finalize_admin_session();
                 $loggedIn = true;
             }
-        } elseif (password_verify($pass, $config['admin_password_hash'] ?? '')) {
-            session_regenerate_id(true);
-            $_SESSION['paragrafy_admin'] = true;
-            $_SESSION['paragrafy_user_name'] = 'Admin';
-            unset($_SESSION['paragrafy_user_id'], $_SESSION['paragrafy_user_email'], $_SESSION['paragrafy_user_locale']);
-            $loggedIn = true;
         }
 
-        if ($loggedIn) {
+        if ($loggedIn || $totpPending !== null) {
+            // Passwort war in beiden Faellen korrekt -- ein evtl. anschliessend
+            // falscher TOTP-Code zaehlt separat unter dem totp:-Praefix (siehe
+            // handle_totp_verify()), nicht hier gegen den Passwort-Zaehler.
             clear_login_failures($db, $clientIp);
             if ($acctIdentifier !== null) {
                 clear_login_failures($db, $acctIdentifier);
+            }
+            if ($totpPending !== null) {
+                $_SESSION['totp_pending'] = $totpPending;
             }
             header('Location: /admin');
             exit;
@@ -93,18 +100,36 @@ if (isset($_POST['action']) && $_POST['action'] === 'login') {
         if ($acctIdentifier !== null) {
             record_login_failure($db, $acctIdentifier);
         }
-        $error = t('admin.login.invalid_credentials');
+        $error = ($email === '' && !empty($config['admin_password_login_disabled']))
+            ? t('admin.login.admin_password_login_disabled')
+            : t('admin.login.invalid_credentials');
     }
 }
 
+if (isset($_POST['action']) && $_POST['action'] === 'totp_verify') {
+    $error = handle_totp_verify($db);
+}
+
+if (isset($_GET['totp_cancel'])) {
+    unset($_SESSION['totp_pending']);
+    header('Location: /admin');
+    exit;
+}
+
 if (isset($_GET['logout'])) {
-    unset($_SESSION['paragrafy_admin'], $_SESSION['paragrafy_user_id'], $_SESSION['paragrafy_user_name'], $_SESSION['paragrafy_user_email'], $_SESSION['paragrafy_user_locale']);
+    unset($_SESSION['paragrafy_admin'], $_SESSION['paragrafy_user_id'], $_SESSION['paragrafy_user_name'], $_SESSION['paragrafy_user_email'], $_SESSION['paragrafy_user_locale'], $_SESSION['totp_pending']);
     header('Location: /admin');
     exit;
 }
 
 if (empty($_SESSION['paragrafy_admin'])) {
-    render_login_view($error);
+    $totpPending = $_SESSION['totp_pending'] ?? null;
+    if (is_array($totpPending) && ($totpPending['started_at'] ?? 0) > time() - 300) {
+        render_totp_view($error);
+    } else {
+        unset($_SESSION['totp_pending']);
+        render_login_view($error);
+    }
     exit;
 }
 
@@ -936,7 +961,7 @@ function handle_sso_login(array $config): void {
     $json = base64_decode($padded, true);
     $payload = $json === false ? null : json_decode($json, true);
 
-    if (!is_array($payload) || !isset($payload['exp']) || !is_int($payload['exp'])) {
+    if (!is_array($payload) || !isset($payload['exp']) || !is_int($payload['exp']) || !isset($payload['n']) || !is_string($payload['n']) || $payload['n'] === '') {
         header('Location: /admin');
         return;
     }
@@ -946,12 +971,248 @@ function handle_sso_login(array $config): void {
         return;
     }
 
+    // Signatur und Ablauf sind bereits geprueft -- ab hier ist das Token
+    // "echt" und darf die Nonce-Tabelle beruehren. Die Reihenfolge ist
+    // wichtig: wuerde die Nonce-Pruefung vor der Signaturpruefung laufen,
+    // koennte ein beliebiges, nicht signiertes Token die Tabelle befuellen
+    // (kleiner DoS-Vektor).
+    $db = get_db();
+    try {
+        $db->prepare('INSERT INTO sso_nonces (nonce) VALUES (?)')->execute([$payload['n']]);
+    } catch (\PDOException $e) {
+        // UNIQUE-Constraint-Verletzung (SQLite Code 19) = Nonce wurde bereits
+        // eingeloest -- Replay ablehnen. Das INSERT ist selbst der atomare
+        // "pruefen + als benutzt markieren"-Schritt, SQLite serialisiert
+        // Writes ohnehin, kein zusaetzliches Locking noetig.
+        http_response_code(403);
+        exit(t('admin.sso.token_already_used'));
+    }
+
+    // Gelegentliches, beilaeufiges Aufraeumen abgelaufener Nonces -- diese
+    // sind laengst nicht mehr einloesbar, die Zeile dient nur noch der
+    // Replay-Erkennung waehrend der TTL. Retention ist unkritisch (keine
+    // personenbezogenen Daten, nur Zufallsstrings + Zeitstempel).
+    if (random_int(1, 20) === 1) {
+        try {
+            $db->exec("DELETE FROM sso_nonces WHERE used_at < datetime('now', '-1 hour')");
+        } catch (\PDOException $e) {
+        }
+    }
+
     session_regenerate_id(true);
     $_SESSION['paragrafy_admin'] = true;
     $_SESSION['paragrafy_user_name'] = 'Admin';
     unset($_SESSION['paragrafy_user_id'], $_SESSION['paragrafy_user_email']);
     $projectId = (int)($_GET['project_id'] ?? 0);
     header('Location: /admin' . ($projectId > 0 ? '?project_id=' . $projectId : ''));
+    exit;
+}
+
+function finalize_user_session(array $user): void {
+    session_regenerate_id(true);
+    $_SESSION['paragrafy_admin'] = true;
+    $_SESSION['paragrafy_user_id'] = (int)$user['id'];
+    $_SESSION['paragrafy_user_name'] = $user['name'];
+    $_SESSION['paragrafy_user_email'] = $user['email'];
+    $_SESSION['paragrafy_user_locale'] = $user['locale'] ?? 'de';
+}
+
+function finalize_admin_session(): void {
+    session_regenerate_id(true);
+    $_SESSION['paragrafy_admin'] = true;
+    $_SESSION['paragrafy_user_name'] = 'Admin';
+    unset($_SESSION['paragrafy_user_id'], $_SESSION['paragrafy_user_email'], $_SESSION['paragrafy_user_locale']);
+}
+
+/**
+ * Second step of the login flow once a user's or the admin's password has
+ * already been verified and totp_pending was stashed in the session. Tries
+ * the 6-digit TOTP code first, falls back to a recovery code. Uses the same
+ * rate_limit_wait()/login_attempts machinery as the password step, under a
+ * "totp:"-prefixed identifier so a flood of bad codes can't be used to
+ * bypass the password throttle (and vice versa).
+ */
+function handle_totp_verify(PDO $db): ?string {
+    $pending = $_SESSION['totp_pending'] ?? null;
+    if (!is_array($pending) || ($pending['started_at'] ?? 0) < time() - 300) {
+        unset($_SESSION['totp_pending']);
+        header('Location: /admin');
+        exit;
+    }
+
+    $clientIp = get_client_ip();
+    $type = $pending['type'] ?? '';
+    $acctIdentifier = $type === 'user' ? ('totp:acct:user:' . (int)($pending['user_id'] ?? 0)) : 'totp:acct:admin';
+    $waitSeconds = max(
+        rate_limit_wait($db, 'totp:' . $clientIp, LOGIN_MAX_ATTEMPTS, LOGIN_WINDOW_MINUTES),
+        rate_limit_wait($db, $acctIdentifier, LOGIN_MAX_ATTEMPTS, LOGIN_WINDOW_MINUTES)
+    );
+    if ($waitSeconds > 0) {
+        return t('admin.login.rate_limited', ['minutes' => (int)ceil($waitSeconds / 60)]);
+    }
+
+    $input = trim($_POST['totp_code'] ?? '');
+    $success = false;
+
+    if ($type === 'user') {
+        $stmt = $db->prepare("SELECT * FROM users WHERE id = ? AND status = 'active'");
+        $stmt->execute([(int)($pending['user_id'] ?? 0)]);
+        $user = $stmt->fetch();
+        if ($user) {
+            $success = totp_finish_user_login($db, $user, $input);
+        }
+    } elseif ($type === 'admin' && admin_totp_available()) {
+        $success = totp_finish_admin_login($input);
+    }
+
+    if ($success) {
+        clear_login_failures($db, $clientIp);
+        clear_login_failures($db, $acctIdentifier);
+        unset($_SESSION['totp_pending']);
+        header('Location: /admin');
+        exit;
+    }
+
+    record_login_failure($db, $clientIp);
+    record_login_failure($db, $acctIdentifier);
+    return t('admin.login.totp_invalid');
+}
+
+function totp_finish_user_login(PDO $db, array $user, string $input): bool {
+    if (totp_consume_for_user_login($db, $user, $input)) {
+        finalize_user_session($user);
+        return true;
+    }
+    return false;
+}
+
+function totp_finish_admin_login(string $input): bool {
+    if (totp_consume_for_admin_login($input)) {
+        finalize_admin_session();
+        return true;
+    }
+    return false;
+}
+
+// TOTP Self-Service (/admin/security) -- gilt fuer den eingeloggten Account
+// (regulaerer User oder, nur self-hosted, der primaere Admin). totp_current_identity()
+// liefert null, wenn TOTP hier gar nicht angeboten wird (Admin auf Managed Cloud).
+if (isset($_POST['action']) && $_POST['action'] === 'totp_setup_start') {
+    $identity = totp_current_identity($db);
+    if ($identity !== null && !totp_identity_enabled($identity) && totp_vendor_available()) {
+        $_SESSION['totp_setup'] = ['secret' => totp_generate_secret()];
+    }
+    header("Location: /admin/security?project_id=$projectId");
+    exit;
+}
+
+if (isset($_POST['action']) && $_POST['action'] === 'totp_setup_cancel') {
+    unset($_SESSION['totp_setup']);
+    header("Location: /admin/security?project_id=$projectId");
+    exit;
+}
+
+if (isset($_POST['action']) && $_POST['action'] === 'totp_setup_confirm') {
+    $identity = totp_current_identity($db);
+    $pendingSecret = $_SESSION['totp_setup']['secret'] ?? null;
+    $code = trim($_POST['totp_code'] ?? '');
+    if ($identity === null || totp_identity_enabled($identity) || !is_string($pendingSecret)) {
+        header("Location: /admin/security?project_id=$projectId");
+        exit;
+    }
+    if (totp_verify_and_consume($pendingSecret, $code, null) === null) {
+        header("Location: /admin/security?project_id=$projectId&msg=totp_setup_invalid_code");
+        exit;
+    }
+    $recoveryCodes = totp_generate_recovery_codes();
+    try {
+        // totp_encrypt_secret() can itself throw if the totp_encryption_key
+        // couldn't be persisted on its first-ever use (see
+        // ensure_totp_encryption_key()) -- treat that exactly like
+        // totp_identity_complete_setup() returning false below: do NOT show
+        // recovery codes or log "enabled", nothing was actually saved, and
+        // telling the user otherwise would make them believe the account is
+        // protected when it isn't. Leave $_SESSION['totp_setup']['secret']
+        // in place so they can simply retry the confirmation.
+        $persisted = totp_identity_complete_setup($db, $identity, totp_encrypt_secret($pendingSecret), totp_hash_recovery_codes($recoveryCodes));
+    } catch (\RuntimeException $e) {
+        $persisted = false;
+    }
+    if (!$persisted) {
+        header("Location: /admin/security?project_id=$projectId&msg=totp_setup_persist_failed");
+        exit;
+    }
+    $_SESSION['totp_setup'] = ['recovery_codes' => $recoveryCodes];
+    log_audit(null, '', t('admin.security.audit.totp_enabled', ['who' => $identity['type'] === 'user' ? $identity['row']['email'] : 'Admin']));
+    header("Location: /admin/security?project_id=$projectId");
+    exit;
+}
+
+if (isset($_POST['action']) && $_POST['action'] === 'totp_setup_ack') {
+    unset($_SESSION['totp_setup']);
+    header("Location: /admin/security?project_id=$projectId&msg=totp_enabled");
+    exit;
+}
+
+if (isset($_POST['action']) && $_POST['action'] === 'totp_regenerate_codes') {
+    $identity = totp_current_identity($db);
+    if ($identity === null || !totp_identity_enabled($identity)) {
+        header("Location: /admin/security?project_id=$projectId");
+        exit;
+    }
+    $recoveryCodes = totp_generate_recovery_codes();
+    if (!totp_identity_replace_recovery_codes($db, $identity, totp_hash_recovery_codes($recoveryCodes))) {
+        header("Location: /admin/security?project_id=$projectId&msg=totp_setup_persist_failed");
+        exit;
+    }
+    $_SESSION['totp_setup'] = ['recovery_codes' => $recoveryCodes];
+    log_audit(null, '', t('admin.security.audit.totp_codes_regenerated', ['who' => $identity['type'] === 'user' ? $identity['row']['email'] : 'Admin']));
+    header("Location: /admin/security?project_id=$projectId");
+    exit;
+}
+
+if (isset($_POST['action']) && $_POST['action'] === 'totp_disable') {
+    $identity = totp_current_identity($db);
+    $pass = $_POST['confirm_password'] ?? '';
+    if ($identity !== null && totp_identity_enabled($identity) && $pass !== '' && password_verify($pass, totp_identity_password_hash($identity, $config))) {
+        if (!totp_identity_disable($db, $identity)) {
+            header("Location: /admin/security?project_id=$projectId&msg=totp_setup_persist_failed");
+            exit;
+        }
+        unset($_SESSION['totp_setup']);
+        log_audit(null, '', t('admin.security.audit.totp_disabled', ['who' => $identity['type'] === 'user' ? $identity['row']['email'] : 'Admin']));
+        header("Location: /admin/security?project_id=$projectId&msg=totp_disabled");
+        exit;
+    }
+    header("Location: /admin/security?project_id=$projectId&msg=totp_disable_wrong_password");
+    exit;
+}
+
+// Admin-seitiger TOTP-Reset fuer einen regulaeren User-Account (Geraet/Recovery-Codes
+// verloren). Nur der primaere Admin darf das; der betroffene User bekommt eine
+// Benachrichtigungsmail, ausserdem ein Audit-Log-Eintrag.
+if (isset($_POST['action']) && $_POST['action'] === 'reset_user_totp') {
+    if (!current_user_is_primary_admin()) {
+        http_response_code(403);
+        echo htmlspecialchars(t('admin.common.access_denied'));
+        exit;
+    }
+    $targetUserId = (int)($_POST['user_id'] ?? 0);
+    $stmt = $db->prepare("SELECT * FROM users WHERE id = ?");
+    $stmt->execute([$targetUserId]);
+    $targetUser = $stmt->fetch();
+    if ($targetUser) {
+        $db->prepare("UPDATE users SET totp_secret = NULL, totp_enabled_at = NULL, totp_recovery_codes = NULL, totp_last_used_step = NULL WHERE id = ?")
+            ->execute([$targetUserId]);
+        send_smtp_mail(
+            $project,
+            $targetUser['email'],
+            t('admin.security.reset_mail.subject'),
+            '<p>' . htmlspecialchars(t('admin.security.reset_mail.body', ['name' => $targetUser['name']])) . '</p>'
+        );
+        log_audit(null, '', t('admin.users.audit.totp_reset', ['name' => $targetUser['name'], 'email' => $targetUser['email']]));
+    }
+    header('Location: /admin/users?msg=totp_reset');
     exit;
 }
 
@@ -964,6 +1225,11 @@ if (str_starts_with($subRoute, '/admin/edit')) {
 
 if (str_starts_with($subRoute, '/admin/settings')) {
     render_settings_view($db, $project, $projects);
+    exit;
+}
+
+if (str_starts_with($subRoute, '/admin/security')) {
+    render_security_view($db, $project, $projects);
     exit;
 }
 
@@ -1026,6 +1292,49 @@ function render_login_view(?string $error): void {
             </form>
             <div style="text-align:center;margin-top:14px">
                 <a href="/admin/forgot-password" style="font-size:12.5px;color:var(--text-faint)"><?= htmlspecialchars(t('admin.login.forgot_password')) ?></a>
+            </div>
+        </div>
+        <div class="login-disclaimer"><?= htmlspecialchars(t('admin.common.footer_disclaimer')) ?></div>
+    </body>
+    </html>
+    <?php
+}
+
+function render_totp_view(?string $error): void {
+    ?>
+    <!DOCTYPE html>
+    <html lang="<?= htmlspecialchars(current_locale()) ?>">
+    <head>
+        <meta charset="utf-8"><title><?= htmlspecialchars(t('admin.login.totp.page_title')) ?></title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <link rel="icon" type="image/svg+xml" href="/paragrafy.svg">
+        <?= theme_head_tags_admin() ?>
+        <?= theme_base_css_admin() ?>
+        <style>
+            body { display: flex; flex-direction: column; min-height: 100vh; align-items: center; justify-content: center; gap: 20px; }
+            .login-card { background: var(--card); padding: 2.25rem; border-radius: var(--radius); width: 340px; box-shadow: none; border: 1px solid var(--border); }
+            .logo-header { display: flex; align-items: center; gap: 0.7rem; margin-bottom: 1.4rem; }
+            .logo-header img { width: 34px; height: 34px; border-radius: var(--radius); }
+            .logo-header h2 { margin: 0; font-size: 1.3rem; font-weight: 800; }
+            .err { color: var(--red); font-size: 0.8125rem; margin-bottom: 0.5rem; }
+        </style>
+    </head>
+    <body>
+        <div class="login-card">
+            <div class="logo-header">
+                <img src="/paragrafy.svg" alt="Paragrafy">
+                <h2><?= htmlspecialchars(t('admin.login.totp.heading')) ?></h2>
+            </div>
+            <p style="font-size:12.5px;color:var(--text-muted);margin:0 0 14px"><?= htmlspecialchars(t('admin.login.totp.hint')) ?></p>
+            <?php if ($error): ?><div class="err"><?= htmlspecialchars($error) ?></div><?php endif; ?>
+            <form method="post">
+                <input type="hidden" name="action" value="totp_verify">
+                <label class="pg-label" style="margin-top:0;"><?= htmlspecialchars(t('admin.login.totp.code_label')) ?></label>
+                <input type="text" name="totp_code" inputmode="numeric" autocomplete="one-time-code" placeholder="123456" autofocus required style="width:100%;margin-bottom:1rem;letter-spacing:2px;font-family:'JetBrains Mono',monospace">
+                <button type="submit" class="pg-btn" style="width:100%;justify-content:center;"><?= t('admin.login.totp.submit_button') ?></button>
+            </form>
+            <div style="text-align:center;margin-top:14px">
+                <a href="/admin?totp_cancel=1" style="font-size:12.5px;color:var(--text-faint)"><?= htmlspecialchars(t('admin.login.totp.back_link')) ?></a>
             </div>
         </div>
         <div class="login-disclaimer"><?= htmlspecialchars(t('admin.common.footer_disclaimer')) ?></div>
@@ -2346,6 +2655,136 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
     <?php
 }
 
+function render_security_view(PDO $db, array $project, array $projects): void {
+    $identity = totp_current_identity($db);
+    $enabled = $identity !== null && totp_identity_enabled($identity);
+    $setupState = $_SESSION['totp_setup'] ?? null;
+    $pendingSecret = is_array($setupState) && isset($setupState['secret']) ? $setupState['secret'] : null;
+    $recoveryCodesToShow = is_array($setupState) && isset($setupState['recovery_codes']) ? $setupState['recovery_codes'] : null;
+    $msg = $_GET['msg'] ?? '';
+    $msgMap = [
+        'totp_setup_invalid_code' => ['err', t('admin.security.msg.invalid_code')],
+        'totp_enabled' => ['ok', t('admin.security.msg.enabled')],
+        'totp_disabled' => ['ok', t('admin.security.msg.disabled')],
+        'totp_disable_wrong_password' => ['err', t('admin.security.msg.wrong_password')],
+        'totp_setup_persist_failed' => ['err', t('admin.security.msg.persist_failed')],
+    ];
+
+    $qrDataUri = null;
+    $provisioningUri = null;
+    if ($pendingSecret !== null && $identity !== null) {
+        $provisioningUri = totp_provisioning_uri($pendingSecret, totp_identity_label($identity, $project), totp_identity_issuer($identity, $project));
+        $qrDataUri = totp_qr_data_uri($provisioningUri);
+    }
+    ?>
+    <!DOCTYPE html>
+    <html lang="<?= htmlspecialchars(current_locale()) ?>">
+    <head>
+        <meta charset="utf-8"><title><?= htmlspecialchars(t('admin.security.page_title', ['project' => $project['name']])) ?></title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <link rel="icon" type="image/svg+xml" href="/paragrafy.svg">
+        <?= theme_head_tags_admin() ?>
+        <?= theme_base_css_admin($project['brand_color'] ?: '#F0A63C') ?>
+        <style>
+            .recovery-codes { font-family:'JetBrains Mono',monospace; font-size:14px; line-height:2; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); padding:14px 18px; display:grid; grid-template-columns:1fr 1fr; gap:2px 20px; }
+        </style>
+    </head>
+    <body>
+        <div class="pg-shell">
+            <?= render_sidebar('security', $project, $projects) ?>
+
+            <div class="pg-main">
+                <div class="pg-topbar">
+                    <div class="pg-crumb"><?= htmlspecialchars($project['name']) ?> <span style="margin:0 4px">/</span> <strong><?= htmlspecialchars(t('admin.security.crumb')) ?></strong></div>
+                </div>
+
+                <div class="pg-content" style="max-width:640px">
+                    <?php if ($msg && isset($msgMap[$msg])): ?>
+                        <div class="pg-alert <?= $msgMap[$msg][0] === 'ok' ? 'pg-alert-amber' : 'pg-alert-red' ?>" style="<?= $msgMap[$msg][0] === 'ok' ? 'background:var(--green-bg);border-color:#bfe6cf;color:#125c3a' : '' ?>">
+                            <div><?= htmlspecialchars($msgMap[$msg][1]) ?></div>
+                        </div>
+                    <?php endif; ?>
+
+                    <div class="pg-card pg-card-pad">
+                        <h2 style="margin:0 0 4px"><?= htmlspecialchars(t('admin.security.heading')) ?></h2>
+                        <p class="pg-card-sub" style="margin-bottom:20px"><?= htmlspecialchars(t('admin.security.subtitle')) ?></p>
+
+                        <?php if ($identity === null): ?>
+                            <p style="font-size:13px;color:var(--text-muted)"><?= htmlspecialchars(t('admin.security.unavailable_managed_cloud')) ?></p>
+                        <?php elseif (!totp_vendor_available()): ?>
+                            <p style="font-size:13px;color:var(--text-muted)"><?= htmlspecialchars(t('admin.security.vendor_missing')) ?></p>
+                        <?php elseif ($recoveryCodesToShow !== null): ?>
+                            <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px"><?= htmlspecialchars(t('admin.security.recovery.intro')) ?></p>
+                            <div class="recovery-codes">
+                                <?php foreach ($recoveryCodesToShow as $code): ?>
+                                    <div><?= htmlspecialchars($code) ?></div>
+                                <?php endforeach; ?>
+                            </div>
+                            <form method="post" style="margin-top:18px">
+                                <?= csrf_field() ?>
+                                <input type="hidden" name="action" value="totp_setup_ack">
+                                <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;color:var(--text-muted);margin-bottom:14px">
+                                    <input type="checkbox" required style="margin-top:3px">
+                                    <?= htmlspecialchars(t('admin.security.recovery.saved_checkbox')) ?>
+                                </label>
+                                <button type="submit" class="pg-btn"><?= htmlspecialchars(t('admin.security.recovery.continue_button')) ?></button>
+                            </form>
+                        <?php elseif ($pendingSecret !== null): ?>
+                            <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px"><?= htmlspecialchars(t('admin.security.setup.scan_hint')) ?></p>
+                            <img src="<?= htmlspecialchars($qrDataUri) ?>" alt="QR" width="200" height="200" style="border:1px solid var(--border);border-radius:var(--radius);padding:8px;background:#fff">
+                            <p style="font-size:12px;color:var(--text-faint);margin:12px 0 4px"><?= htmlspecialchars(t('admin.security.setup.manual_entry_hint')) ?></p>
+                            <code style="font-family:'JetBrains Mono',monospace;font-size:13px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;display:inline-block"><?= htmlspecialchars($pendingSecret) ?></code>
+
+                            <form method="post" style="margin-top:20px">
+                                <?= csrf_field() ?>
+                                <input type="hidden" name="action" value="totp_setup_confirm">
+                                <label class="pg-label" style="margin-top:0"><?= htmlspecialchars(t('admin.security.setup.code_label')) ?></label>
+                                <input type="text" name="totp_code" inputmode="numeric" autocomplete="one-time-code" placeholder="123456" autofocus required style="width:100%;margin-bottom:12px;letter-spacing:2px;font-family:'JetBrains Mono',monospace">
+                                <div style="display:flex;gap:10px">
+                                    <button type="submit" class="pg-btn"><?= htmlspecialchars(t('admin.security.setup.confirm_button')) ?></button>
+                                    <button type="submit" formnovalidate name="action" value="totp_setup_cancel" class="pg-btn-secondary"><?= htmlspecialchars(t('admin.security.setup.cancel_button')) ?></button>
+                                </div>
+                            </form>
+                        <?php elseif ($enabled): ?>
+                            <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px">
+                                <span class="pg-pill pg-pill-green"><span class="pg-pill-dot"></span><?= htmlspecialchars(t('admin.security.status_active')) ?></span>
+                            </div>
+
+                            <form method="post" style="margin-bottom:22px">
+                                <?= csrf_field() ?>
+                                <input type="hidden" name="action" value="totp_regenerate_codes">
+                                <p style="font-size:12.5px;color:var(--text-faint);margin:0 0 10px"><?= htmlspecialchars(t('admin.security.regenerate.hint')) ?></p>
+                                <button type="submit" class="pg-btn-secondary" onclick="return confirm(<?= json_encode(t('admin.security.regenerate.confirm')) ?>)"><?= htmlspecialchars(t('admin.security.regenerate.button')) ?></button>
+                            </form>
+
+                            <hr class="pg-sep">
+
+                            <form method="post">
+                                <?= csrf_field() ?>
+                                <input type="hidden" name="action" value="totp_disable">
+                                <p style="font-size:12.5px;color:var(--text-faint);margin:0 0 10px"><?= htmlspecialchars(t('admin.security.disable.hint')) ?></p>
+                                <label class="pg-label" style="margin-top:0"><?= htmlspecialchars(t('admin.security.disable.password_label')) ?></label>
+                                <input type="password" name="confirm_password" required style="width:100%;margin-bottom:12px">
+                                <button type="submit" class="pg-btn-secondary danger" onclick="return confirm(<?= json_encode(t('admin.security.disable.confirm')) ?>)"><?= htmlspecialchars(t('admin.security.disable.button')) ?></button>
+                            </form>
+                        <?php else: ?>
+                            <form method="post">
+                                <?= csrf_field() ?>
+                                <input type="hidden" name="action" value="totp_setup_start">
+                                <button type="submit" class="pg-btn"><?= htmlspecialchars(t('admin.security.setup.start_button')) ?></button>
+                            </form>
+                        <?php endif; ?>
+                    </div>
+                </div>
+
+                <div class="pg-footer-note"><?= htmlspecialchars(t('admin.common.footer_disclaimer')) ?></div>
+            </div>
+        </div>
+    </body>
+    </html>
+    <?php
+}
+
 function render_users_view(PDO $db, array $project, array $projects): void {
     $users = $db->query("SELECT * FROM users ORDER BY (status = 'active') DESC, name ASC")->fetchAll();
     $accessMap = [];
@@ -2361,6 +2800,7 @@ function render_users_view(PDO $db, array $project, array $projects): void {
         'user_deleted' => ['ok', t('admin.users.msg.user_deleted')],
         'managed_cloud_blocked' => ['err', t('admin.users.msg.managed_cloud_blocked')],
         'access_updated' => ['ok', t('admin.users.msg.access_updated')],
+        'totp_reset' => ['ok', t('admin.users.msg.totp_reset')],
     ];
     ?>
     <!DOCTYPE html>
@@ -2408,6 +2848,7 @@ function render_users_view(PDO $db, array $project, array $projects): void {
                                     <th><?= htmlspecialchars(t('admin.users.col_email')) ?></th>
                                     <th><?= htmlspecialchars(t('admin.users.col_notes')) ?></th>
                                     <th><?= htmlspecialchars(t('admin.users.col_status')) ?></th>
+                                    <th style="text-align:center"><?= htmlspecialchars(t('admin.users.col_totp')) ?></th>
                                     <?php foreach ($projects as $p): ?>
                                         <th style="text-align:center;white-space:nowrap"><?= htmlspecialchars($p['name']) ?></th>
                                     <?php endforeach; ?>
@@ -2416,7 +2857,7 @@ function render_users_view(PDO $db, array $project, array $projects): void {
                             </thead>
                             <tbody>
                                 <?php if (empty($users)): ?>
-                                    <tr><td colspan="<?= 5 + count($projects) ?>" style="color:var(--text-faint);font-style:italic"><?= htmlspecialchars(t('admin.users.empty')) ?></td></tr>
+                                    <tr><td colspan="<?= 6 + count($projects) ?>" style="color:var(--text-faint);font-style:italic"><?= htmlspecialchars(t('admin.users.empty')) ?></td></tr>
                                 <?php endif; ?>
                                 <?php foreach ($users as $u): ?>
                                     <?php
@@ -2433,6 +2874,20 @@ function render_users_view(PDO $db, array $project, array $projects): void {
                                                 <span class="pg-pill pg-pill-green"><span class="pg-pill-dot"></span><?= htmlspecialchars(t('admin.users.status_active')) ?></span>
                                             <?php else: ?>
                                                 <span class="pg-pill pg-pill-muted"><?= htmlspecialchars(t('admin.users.status_invited')) ?></span>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td style="text-align:center">
+                                            <?php if (!empty($u['totp_enabled_at'])): ?>
+                                                <form method="post" style="margin:0" onsubmit="return confirm('<?= htmlspecialchars(t('admin.users.confirm_totp_reset', ['name' => $u['name']]), ENT_QUOTES) ?>');">
+                                                    <?= csrf_field() ?>
+                                                    <input type="hidden" name="action" value="reset_user_totp">
+                                                    <input type="hidden" name="user_id" value="<?= $u['id'] ?>">
+                                                    <button type="submit" class="pg-icon-btn" title="<?= htmlspecialchars(t('admin.users.totp_reset_title')) ?>">
+                                                        <span class="pg-pill pg-pill-green" style="cursor:pointer"><span class="pg-pill-dot"></span><?= htmlspecialchars(t('admin.security.status_active')) ?></span>
+                                                    </button>
+                                                </form>
+                                            <?php else: ?>
+                                                <span style="color:var(--text-faintest)">&mdash;</span>
                                             <?php endif; ?>
                                         </td>
                                         <?php foreach ($projects as $p): ?>

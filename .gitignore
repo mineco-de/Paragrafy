@@ -5,6 +5,7 @@
 *.sqlite-shm
 paragrafy_data.sqlite
 config.php
+config.lock
 .env
 .env.local
 .env.*.local
@@ -21,3 +22,4 @@ Thumbs.db
 .vscode/
 /scratch_design/
 /backups/
+/vendor/

@@ -1,9 +1,17 @@
+FROM composer:2 AS composer_bin
+
 FROM php:8.2-apache
+
+COPY --from=composer_bin /usr/bin/composer /usr/bin/composer
 
 RUN apt-get update && apt-get install -y \
     libsqlite3-dev \
     libzip-dev \
-    && docker-php-ext-install pdo pdo_sqlite zip \
+    libpng-dev \
+    libfreetype6-dev \
+    libjpeg62-turbo-dev \
+    && docker-php-ext-configure gd --with-freetype --with-jpeg \
+    && docker-php-ext-install pdo pdo_sqlite zip gd \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 RUN a2enmod rewrite
@@ -34,6 +42,12 @@ WORKDIR /var/www/html
 # code you actually have checked out. See .dockerignore for what's excluded
 # (in particular: local data/, .git/, and any local .env files).
 COPY . /var/www/html/
+
+# TOTP (spomky-labs/otphp) + QR-code rendering (endroid/qr-code) dependencies.
+# --no-dev/--optimize-autoloader keep the vendored footprint production-only;
+# vendor/ itself isn't committed (see .gitignore), so this is the only place
+# a Docker install actually gets it.
+RUN composer install --no-dev --optimize-autoloader --no-interaction --working-dir=/var/www/html
 
 # Persistent data (DB, config.php, backups, .env) lives OUTSIDE the web-served
 # /var/www/html docroot -- a security-incident forensics review on 2026-09-07

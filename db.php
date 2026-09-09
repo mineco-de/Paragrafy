@@ -6,7 +6,7 @@ declare(strict_types=1);
 
 // CalVer: JAHR.MONAT.BUILD - BUILD zaehlt Releases innerhalb des Monats hoch (startet bei 1).
 // Siehe CHANGELOG.md fuer die Aenderungen je Version.
-define('PARAGRAFY_VERSION', '2026.9.11');
+define('PARAGRAFY_VERSION', '2026.9.12');
 define('PARAGRAFY_DIR', __DIR__);
 // Where persistent data (DB, config, backups, .env) lives. Defaults to the
 // code directory (bare-metal installs); set PARAGRAFY_DATA_DIR to point this
@@ -20,6 +20,8 @@ define('BACKUP_RETENTION_DAYS', 7);
 if (!is_dir(PARAGRAFY_DATA_DIR)) {
     @mkdir(PARAGRAFY_DATA_DIR, 0755, true);
 }
+
+require_once __DIR__ . '/totp.php';
 
 function load_env_file(): array {
     $env = [];
@@ -49,19 +51,98 @@ function is_installed(): bool {
     return file_exists(CONFIG_FILE) && file_exists(DB_FILE);
 }
 
+/** Shared in-process cache backing get_config()/write_config() (see write_config() for why). */
+function &config_cache_ref(): ?array {
+    static $cache = null;
+    return $cache;
+}
+
 function get_config(): array {
+    $cache = &config_cache_ref();
+    if ($cache !== null) {
+        return $cache;
+    }
     if (!file_exists(CONFIG_FILE)) {
         return [];
     }
-    return require CONFIG_FILE;
+    $cache = require CONFIG_FILE;
+    return $cache;
 }
 
-function write_config(array $config): void {
+/**
+ * Writes config.php and keeps the in-process cache in sync so a get_config()
+ * call later in the *same* request immediately sees this write. Without this,
+ * two write_config() calls in one request (e.g. TOTP setup persisting the
+ * secret, then the recovery codes, in two separate get_config()+write_config()
+ * round-trips) can clobber each other: PHP's `require` re-parses the file on
+ * every call, but with opcache enabled the bytecode isn't guaranteed to be
+ * revalidated against disk within the same request/revalidate_freq window --
+ * the second write_config() could start from a get_config() that still
+ * reflects the pre-first-write state and overwrite it.
+ */
+/**
+ * Atomic read-modify-write for config.php: holds an exclusive file lock for
+ * the entire cycle, so two concurrent requests mutating config.php (e.g. two
+ * logins racing to consume the same admin TOTP step/recovery code, or two
+ * first-time TOTP setups racing to generate totp_encryption_key) can't
+ * interleave their get_config()+write_config() calls and clobber each
+ * other's write -- unlike two independent get_config()/write_config() calls,
+ * which are each individually consistent but not atomic as a pair.
+ *
+ * $mutator receives the current config (freshly read from disk under the
+ * lock, ignoring the in-process cache to guarantee it reflects any write
+ * another process made) and returns the new config to persist, or null to
+ * abort without writing (e.g. "the code was already consumed by someone
+ * else, don't touch the file"). Returns the written config, or null if the
+ * mutator aborted.
+ */
+function update_config(callable $mutator): ?array {
+    if (!is_dir(PARAGRAFY_DATA_DIR)) {
+        mkdir(PARAGRAFY_DATA_DIR, 0755, true);
+    }
+    $lockHandle = fopen(PARAGRAFY_DATA_DIR . '/config.lock', 'c');
+    if ($lockHandle === false || !flock($lockHandle, LOCK_EX)) {
+        // Fail closed, not open: falling back to an unlocked read-modify-
+        // write here would silently reintroduce the exact race this
+        // function exists to prevent (e.g. two logins consuming the same
+        // admin TOTP step/recovery code) for every caller that trusts a
+        // non-null return as proof of atomic, durable consumption. A lock
+        // acquisition failure is an environment problem (unwritable data
+        // dir, a filesystem without flock support) the operator needs to
+        // know about -- not something to paper over with weaker semantics.
+        throw new \RuntimeException('Could not acquire config.lock for an atomic config update.');
+    }
+    try {
+        $config = file_exists(CONFIG_FILE) ? (require CONFIG_FILE) : [];
+        $config = $mutator($config);
+        // A caller like totp_consume_for_admin_login() only trusts the
+        // one-time factor as consumed once update_config() returns non-null
+        // -- if the write itself fails (disk full, permissions), treat the
+        // whole mutation as if it never happened rather than letting the
+        // caller finalize a session/state change that never made it to disk
+        // (which would make the same code replayable on the next request).
+        if ($config === null || !write_config($config)) {
+            return null;
+        }
+        return $config;
+    } finally {
+        flock($lockHandle, LOCK_UN);
+        fclose($lockHandle);
+    }
+}
+
+/** Returns false (without throwing) if the write itself failed, so callers -- especially update_config() -- can refuse to treat an unpersisted mutation as having happened. */
+function write_config(array $config): bool {
     if (!is_dir(PARAGRAFY_DATA_DIR)) {
         mkdir(PARAGRAFY_DATA_DIR, 0755, true);
     }
     $content = "<?php\nreturn " . var_export($config, true) . ";\n";
-    file_put_contents(CONFIG_FILE, $content);
+    if (file_put_contents(CONFIG_FILE, $content) === false) {
+        return false;
+    }
+    $cache = &config_cache_ref();
+    $cache = $config;
+    return true;
 }
 
 /** Returns the shared secret for the /api/cron/* endpoints, generating one on first use (self-healing for installs from before this existed). */
@@ -74,10 +155,16 @@ function ensure_cron_secret(): string {
 }
 
 function regenerate_cron_secret(): string {
-    $config = get_config();
     $secret = bin2hex(random_bytes(32));
-    $config['cron_secret'] = $secret;
-    write_config($config);
+    // Goes through update_config() (not a bare get_config()+write_config())
+    // so this can't race with a concurrent TOTP config mutation (e.g. an
+    // admin login consuming a TOTP step) and silently clobber it or get
+    // clobbered by it -- both now serialize on the same config.php lock.
+    update_config(function (?array $config) use ($secret): array {
+        $config = $config ?? [];
+        $config['cron_secret'] = $secret;
+        return $config;
+    });
     return $secret;
 }
 
@@ -181,6 +268,18 @@ function ensure_schema_migrations(PDO $pdo): void {
             if (!in_array('invite_token_expires_at', $userColNames)) {
                 $pdo->exec("ALTER TABLE users ADD COLUMN invite_token_expires_at DATETIME DEFAULT NULL");
             }
+            if (!in_array('totp_secret', $userColNames)) {
+                $pdo->exec("ALTER TABLE users ADD COLUMN totp_secret TEXT NULL");
+            }
+            if (!in_array('totp_enabled_at', $userColNames)) {
+                $pdo->exec("ALTER TABLE users ADD COLUMN totp_enabled_at DATETIME NULL");
+            }
+            if (!in_array('totp_recovery_codes', $userColNames)) {
+                $pdo->exec("ALTER TABLE users ADD COLUMN totp_recovery_codes TEXT NULL");
+            }
+            if (!in_array('totp_last_used_step', $userColNames)) {
+                $pdo->exec("ALTER TABLE users ADD COLUMN totp_last_used_step INTEGER NULL");
+            }
         }
 
         $stmtTrans = $pdo->query("SELECT name FROM sqlite_master WHERE type='table' AND name='translations'");
@@ -203,6 +302,13 @@ function ensure_schema_migrations(PDO $pdo): void {
                 }
             }
         }
+
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS sso_nonces (
+                nonce TEXT PRIMARY KEY,
+                used_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+        ");
 
         $pdo->exec("
             CREATE TABLE IF NOT EXISTS webhook_logs (
@@ -229,7 +335,14 @@ function ensure_schema_migrations(PDO $pdo): void {
                 status TEXT DEFAULT 'invited',
                 invite_token TEXT DEFAULT '',
                 invited_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                activated_at DATETIME DEFAULT NULL
+                activated_at DATETIME DEFAULT NULL,
+                locale TEXT DEFAULT 'de',
+                notes TEXT DEFAULT '',
+                invite_token_expires_at DATETIME DEFAULT NULL,
+                totp_secret TEXT NULL,
+                totp_enabled_at DATETIME NULL,
+                totp_recovery_codes TEXT NULL,
+                totp_last_used_step INTEGER NULL
             );
         ");
 
@@ -411,7 +524,16 @@ function init_database_schema(PDO $pdo): void {
             activated_at DATETIME DEFAULT NULL,
             locale TEXT DEFAULT 'de',
             notes TEXT DEFAULT '',
-            invite_token_expires_at DATETIME DEFAULT NULL
+            invite_token_expires_at DATETIME DEFAULT NULL,
+            totp_secret TEXT NULL,
+            totp_enabled_at DATETIME NULL,
+            totp_recovery_codes TEXT NULL,
+            totp_last_used_step INTEGER NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sso_nonces (
+            nonce TEXT PRIMARY KEY,
+            used_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
         CREATE TABLE IF NOT EXISTS user_projects (
@@ -2600,6 +2722,9 @@ function render_sidebar(string $active, array $project, array $projects): string
     ];
     if (current_user_is_primary_admin()) {
         $items['users'] = ['/admin/users', t('admin.common.nav.users'), 'users'];
+    }
+    if (!current_user_is_primary_admin() || admin_totp_available()) {
+        $items['security'] = ['/admin/security?project_id=' . $project['id'], t('admin.common.nav.security'), 'shield'];
     }
     $items['audit'] = ['/admin/audit?project_id=' . $project['id'], t('admin.common.nav.audit'), 'clock'];
     $items['consent_log'] = ['/admin/consent-log?project_id=' . $project['id'], t('admin.common.nav.consent_log'), 'shield'];
