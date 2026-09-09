@@ -10,19 +10,25 @@ define('PUBLIC_CACHE_MAX_AGE_DAYS', 30);
 define('PUBLIC_CACHE_MAX_AGE_SECONDS', 300);
 
 /**
- * Zeitpunkt des letzten Deploys, ueber den Dateimtime der Rendering-relevanten Skripte
- * geschaetzt: aendert sich automatisch bei jedem Deploy (git pull/rsync/Docker-Build
- * aktualisieren Datei-mtimes), ohne dass PARAGRAFY_VERSION manuell in ein Datum
- * uebersetzt werden muesste. Dient als untere Schranke fuer Last-Modified, damit ein
- * reiner If-Modified-Since-Abgleich (ohne ETag) nach einem Rendering-Deploy nicht
- * faelschlich 304 liefert, obwohl sich die Translation selbst nicht geaendert hat.
+ * Zeitpunkt des letzten Deploys, ueber die juengste Dateimtime aller App-PHP-Dateien
+ * (Wurzelverzeichnis + lang/, wo t() seine Uebersetzungsstrings herlaedt) geschaetzt:
+ * aendert sich automatisch bei jedem Deploy (git pull/rsync/Docker-Build aktualisieren
+ * Datei-mtimes), ohne dass PARAGRAFY_VERSION manuell in ein Datum uebersetzt werden
+ * muesste oder eine Datei-Liste von Hand gepflegt werden muss. Dient als untere Schranke
+ * fuer Last-Modified, damit ein reiner If-Modified-Since-Abgleich (ohne ETag) nach einem
+ * Rendering- oder Text-Deploy nicht faelschlich 304 liefert, obwohl sich die Translation
+ * selbst nicht geaendert hat.
  */
 function public_cache_deploy_ts(): int {
     static $ts = null;
     if ($ts === null) {
         $ts = 0;
-        foreach (['index.php', 'db.php', 'cache.php'] as $file) {
-            $mtime = @filemtime(PARAGRAFY_DIR . '/' . $file);
+        $files = array_merge(
+            glob(PARAGRAFY_DIR . '/*.php') ?: [],
+            glob(PARAGRAFY_DIR . '/lang/*.php') ?: []
+        );
+        foreach ($files as $file) {
+            $mtime = @filemtime($file);
             if ($mtime !== false) {
                 $ts = max($ts, $mtime);
             }
