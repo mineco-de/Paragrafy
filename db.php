@@ -6,7 +6,7 @@ declare(strict_types=1);
 
 // CalVer: JAHR.MONAT.BUILD - BUILD zaehlt Releases innerhalb des Monats hoch (startet bei 1).
 // Siehe CHANGELOG.md fuer die Aenderungen je Version.
-define('PARAGRAFY_VERSION', '2026.9.13');
+define('PARAGRAFY_VERSION', '2026.9.14');
 define('PARAGRAFY_DIR', __DIR__);
 // Where persistent data (DB, config, backups, .env) lives. Defaults to the
 // code directory (bare-metal installs); set PARAGRAFY_DATA_DIR to point this
@@ -795,6 +795,143 @@ function sanitize_html_node(DOMNode $node, array $allowedTags, array $dropEntire
 
         sanitize_html_node($child, $allowedTags, $dropEntirely);
     }
+}
+
+/**
+ * Waehlt aus einer Liste veroeffentlichter Uebersetzungen desselben Dokuments die beste
+ * Sprache: zuerst $preferredLang, dann Englisch, dann die Projekt-primary_lang, sonst die
+ * erste vorhandene (deckt den Fall "nur eine Sprache existiert" automatisch ab).
+ * $primaryLang ist dabei kein verlaesslicher Garant fuer Existenz (frei editierbares Feld),
+ * daher nur als Versuch in der Kette, nicht als sicherer Treffer.
+ */
+function pick_fallback_translation(array $candidates, string $preferredLang, string $primaryLang): ?array {
+    if (empty($candidates)) {
+        return null;
+    }
+    foreach ([$preferredLang, 'en', $primaryLang] as $lang) {
+        foreach ($candidates as $c) {
+            if ($c['lang'] === $lang) {
+                return $c;
+            }
+        }
+    }
+    return $candidates[0];
+}
+
+/**
+ * Fuehrt $sql aus und liefert die einzige Ergebniszeile zurueck -- aber nur, wenn GENAU EIN
+ * Treffer existiert. Bei 0 oder >=2 Treffern wird bewusst null geliefert statt zu raten (per
+ * LIMIT 2 reicht ein zweiter Treffer schon, um "mehrdeutig" zu erkennen, ohne alle Zeilen zu
+ * laden). Bei oeffentlichen Rechtstexten ist das falsche Dokument auszuliefern schlimmer als
+ * ein 404 -- diese Funktion setzt "nicht eindeutig = kein Treffer" konsequent durch, statt es
+ * an jeder Aufrufstelle einzeln (und ggf. inkonsistent) zu pruefen.
+ */
+function find_unambiguous_match(PDO $db, string $sql, array $params): ?array {
+    $stmt = $db->prepare($sql . ' LIMIT 2');
+    $stmt->execute($params);
+    $matches = $stmt->fetchAll();
+    return count($matches) === 1 ? $matches[0] : null;
+}
+
+/**
+ * Findet die oeffentlich auslieferbare Uebersetzung fuer genau die angefragte ($lang, $slug)-
+ * Kombination -- der Normalfall, BEVOR ueberhaupt ein Sprach-Fallback in Betracht gezogen wird.
+ * Historisch war das eine einzelne Query mit `t.slug = ? OR dt.slug = ?`, die (genau wie der
+ * urspruengliche Fallback-Entwurf) bei zwei Dokumenten mit kollidierendem Slug in derselben
+ * Sprache per ungeordnetem LIMIT 1 haette das falsche Dokument waehlen koennen.
+ *
+ * Aufloesung in ZWEI PRIORITAETSSTUFEN (nicht als eine kombinierte Menge -- siehe
+ * find_public_translation_with_fallback() fuer die Begruendung, warum dt.slug bewusst Vorrang
+ * vor t.slug hat, auch wenn beide vorkommen):
+ * 1. dt.slug (kanonisch) -- eindeutigkeitsgeprueft ueber find_unambiguous_match(), gewinnt wenn
+ *    eindeutig, UNABHAENGIG davon, ob $slug zufaellig auch als jemandes Custom-Slug auftaucht.
+ * 2. Nur falls Stufe 1 nichts liefert: t.slug (benutzerdefiniert), ebenfalls eindeutigkeitsgeprueft.
+ */
+function find_public_translation(PDO $db, int $projectId, string $lang, string $slug): ?array {
+    $doc = find_unambiguous_match(
+        $db,
+        "SELECT DISTINCT d.id FROM documents d
+         JOIN doc_types dt ON d.doc_type_id = dt.id
+         JOIN translations t ON t.document_id = d.id AND t.lang = ? AND t.status = 'published'
+         WHERE d.project_id = ? AND dt.slug = ?",
+        [$lang, $projectId, $slug]
+    );
+
+    if (!$doc) {
+        $doc = find_unambiguous_match(
+            $db,
+            "SELECT DISTINCT d.id FROM translations t
+             JOIN documents d ON t.document_id = d.id
+             WHERE d.project_id = ? AND t.lang = ? AND t.slug = ? AND t.status = 'published'",
+            [$projectId, $lang, $slug]
+        );
+    }
+
+    if (!$doc) {
+        return null;
+    }
+
+    $stmt = $db->prepare("
+        SELECT t.*, d.doc_type_id, dt.title AS default_title, dt.slug AS default_slug
+        FROM translations t
+        JOIN documents d ON t.document_id = d.id
+        JOIN doc_types dt ON d.doc_type_id = dt.id
+        WHERE t.document_id = ? AND t.lang = ? AND t.status = 'published'
+        LIMIT 1
+    ");
+    $stmt->execute([$doc['id'], $lang]);
+    return $stmt->fetch() ?: null;
+}
+
+/**
+ * Findet eine oeffentlich auslieferbare Uebersetzung fuer $slug, wenn die exakt angefragte
+ * $lang keine veroeffentlichte Version hat. Das Dokument wird ueber JEDE Sprache anhand des
+ * Slugs identifiziert, in zwei PRIORITAETSSTUFEN statt einer kombinierten Menge:
+ *
+ * 1. dt.slug (kanonisch): doc_types.slug hat ein UNIQUE-Constraint (der Doc-Type selbst ist
+ *    projektweit eindeutig), aber documents(project_id, doc_type_id) ist NICHT UNIQUE --
+ *    trotzdem ueber find_unambiguous_match() geprueft statt blindem LIMIT 1. Findet Stufe 1
+ *    einen eindeutigen Treffer, WIRD ER VERWENDET, auch wenn derselbe Slug zufaellig auch als
+ *    benutzerdefinierter Slug eines VOELLIG ANDEREN Dokuments existiert (Stufe 2 wird dann gar
+ *    nicht erst abgefragt). Grund: der kanonische Slug ist ein strukturell garantiertes,
+ *    admin-vergebenes Merkmal des Doc-Types -- ein zufaellig gleichlautender Custom-Slug eines
+ *    fremden Dokuments ist so gut wie immer ein Tippfehler/Versehen der jeweiligen Redaktion,
+ *    nicht ein ernsthafter Anspruch auf denselben Slug. Diese Prioritaet ist zugleich wichtig
+ *    fuer render_public_overview(): deren Links zeigen IMMER auf dt.slug (siehe dort) und
+ *    duerfen sich nicht durch eine fremde Custom-Slug-Kollision in ein 404 verwandeln lassen,
+ *    obwohl die Uebersicht das verlinkte Dokument eindeutig kannte.
+ * 2. Nur falls Stufe 1 nichts liefert: t.slug (benutzerdefiniert). Der ist NICHT global eindeutig
+ *    (nur UNIQUE(document_id, lang)) -- zwei verschiedene Dokumente KOENNEN denselben eigenen
+ *    Slug tragen, daher ebenfalls ueber find_unambiguous_match() statt zu raten.
+ */
+function find_public_translation_with_fallback(PDO $db, int $projectId, string $lang, string $slug, string $primaryLang): ?array {
+    $doc = find_unambiguous_match(
+        $db,
+        "SELECT DISTINCT d.id FROM documents d JOIN doc_types dt ON d.doc_type_id = dt.id WHERE d.project_id = ? AND dt.slug = ?",
+        [$projectId, $slug]
+    );
+
+    if (!$doc) {
+        $doc = find_unambiguous_match(
+            $db,
+            "SELECT DISTINCT d.id FROM translations t JOIN documents d ON t.document_id = d.id WHERE d.project_id = ? AND t.slug = ? AND t.status = 'published'",
+            [$projectId, $slug]
+        );
+    }
+
+    if (!$doc) {
+        return null;
+    }
+
+    $stmt = $db->prepare("
+        SELECT t.*, d.doc_type_id, dt.title AS default_title, dt.slug AS default_slug
+        FROM translations t
+        JOIN documents d ON t.document_id = d.id
+        JOIN doc_types dt ON d.doc_type_id = dt.id
+        WHERE t.document_id = ? AND t.status = 'published'
+    ");
+    $stmt->execute([$doc['id']]);
+    return pick_fallback_translation($stmt->fetchAll(), $lang, $primaryLang);
 }
 
 function replace_placeholders(string $content, array $project): string {

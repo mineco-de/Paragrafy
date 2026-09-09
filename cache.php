@@ -40,14 +40,24 @@ function public_cache_deploy_ts(): int {
 /**
  * Baut den ETag fuer ein oeffentlich ausgeliefertes Dokument. Fliessen ein:
  * PARAGRAFY_VERSION (ein Deploy mit geaendertem Rendering invalidiert automatisch alle
- * bisherigen ETags) sowie projects.settings_version (Projekt-Stammdaten wie Firmenname/
- * Adresse/Branding werden per replace_placeholders() bzw. direkt ins Template eingebettet).
+ * bisherigen ETags), projects.settings_version (Projekt-Stammdaten wie Firmenname/Adresse/
+ * Branding werden per replace_placeholders() bzw. direkt ins Template eingebettet),
+ * $resolvedLang (die TATSAECHLICH ausgelieferte Sprache, die sich bei Sprach-Fallbacks von
+ * $lang unterscheiden kann) sowie $translationId -- der Primary Key der ausgelieferten
+ * translations-Zeile. $translationId ist der eigentlich entscheidende Anker: bei
+ * Sprach-Fallback kann die ausgeloeste Uebersetzung je nach Admin-Aenderungen ueber die Zeit
+ * wechseln (z. B. wenn das bisher gewaehlte Dokument depubliziert wird und ein anderes mit
+ * gleichem Slug einspringt), und zwei verschiedene translations-Zeilen koennten zufaellig
+ * denselben Slug, dieselbe Sprache UND denselben updated_at-Sekundenwert teilen (z. B. aus
+ * derselben Vorlage im selben Bulk-Vorgang angelegt). Da translations.id ein eindeutiger
+ * Primary Key ist, schliesst er diese Kollisionsklasse grundsaetzlich aus, statt nur die
+ * bisher beobachteten Symptome (Sprache, Slug) einzeln zu patchen.
  * settings_version ist ein bei jedem UPDATE monoton hochgezaehlter Zaehler statt (nur) ein
  * DATETIME, damit zwei Aenderungen innerhalb derselben Sekunde (CURRENT_TIMESTAMP hat nur
  * Sekundenaufloesung in SQLite) trotzdem unterschiedliche Cache-Identitaeten erzeugen.
  */
-function build_public_cache_etag(int $projectId, string $lang, string $slug, string $updatedAt, int $projectSettingsVersion): string {
-    $hash = sha1($projectId . '|' . $lang . '|' . $slug . '|' . $updatedAt . '|' . $projectSettingsVersion . '|' . PARAGRAFY_VERSION);
+function build_public_cache_etag(int $projectId, string $lang, string $slug, string $updatedAt, int $projectSettingsVersion, string $resolvedLang, int $translationId): string {
+    $hash = sha1($projectId . '|' . $lang . '|' . $resolvedLang . '|' . $slug . '|' . $updatedAt . '|' . $projectSettingsVersion . '|' . $translationId . '|' . PARAGRAFY_VERSION);
     return '"' . $hash . '"';
 }
 
@@ -67,10 +77,24 @@ function build_public_last_modified(string $updatedAtSql, string $projectUpdated
 }
 
 /**
- * Wertet If-None-Match / If-Modified-Since gegen den aktuellen ETag/Last-Modified
- * aus. Setzt IMMER zuerst ETag/Last-Modified/Cache-Control (auch bei 304 laut RFC
- * 7232 Sec. 4.1 vorgeschrieben). Bei Match wird der 304-Status gesetzt und true
- * zurueckgegeben - der Aufrufer muss dann selbst exit/return ohne Body ausloesen.
+ * Wertet If-None-Match gegen den aktuellen ETag aus. Setzt IMMER zuerst ETag/Last-Modified/
+ * Cache-Control (auch bei 304 laut RFC 7232 Sec. 4.1 vorgeschrieben). Bei Match wird der
+ * 304-Status gesetzt und true zurueckgegeben - der Aufrufer muss dann selbst exit/return
+ * ohne Body ausloesen.
+ *
+ * If-Modified-Since wird bewusst NICHT als alleiniger Validator akzeptiert (nur If-None-Match/
+ * ETag kann 304 ausloesen), obwohl der Last-Modified-Header weiterhin gesendet wird. Grund:
+ * Sprach-Fallbacks koennen dazu fuehren, dass sich die fuer ein und denselben (Sprache, Slug)-
+ * Aufruf ausgelieferte Identitaet zwischen zwei Requests aendert (z. B. Uebergang von einer
+ * EN-Fallback-Antwort zu einer inzwischen echt veroeffentlichten FR-Version, oder umgekehrt
+ * bei Depublizierung) -- und Last-Modified (Sekundenaufloesung, mehrere ueberlagerte Freshness-
+ * Signale je nach Herkunft) garantiert dabei keine strikt aufsteigende Reihenfolge relativ zu
+ * einem beim Client zwischengespeicherten aelteren Last-Modified-Wert. Der ETag (enthaelt
+ * translations.id, also die tatsaechliche Identitaet der ausgelieferten Zeile) ist der einzige
+ * Validator, der diese Faelle zuverlaessig unterscheidet. Ein Client, der ausschliesslich
+ * If-Modified-Since ohne ETag-Unterstuetzung nutzt, bekommt dadurch immer eine frische Antwort
+ * statt eines potenziell faelschlichen 304 -- korrekt ist wichtiger als maximale Cache-Trefferquote
+ * fuer diese seltene Client-Klasse.
  */
 function check_conditional_request(string $etag, int $lastModifiedTs, int $maxAge = PUBLIC_CACHE_MAX_AGE_SECONDS): bool {
     header('ETag: ' . $etag);
@@ -92,16 +116,6 @@ function check_conditional_request(string $etag, int $lastModifiedTs, int $maxAg
                 http_response_code(304);
                 return true;
             }
-        }
-        return false;
-    }
-
-    $ifModifiedSince = $_SERVER['HTTP_IF_MODIFIED_SINCE'] ?? '';
-    if ($ifModifiedSince !== '') {
-        $since = strtotime($ifModifiedSince);
-        if ($since !== false && $lastModifiedTs <= $since) {
-            http_response_code(304);
-            return true;
         }
     }
 
