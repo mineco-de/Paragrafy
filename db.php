@@ -838,10 +838,14 @@ function find_unambiguous_match(PDO $db, string $sql, array $params): ?array {
  * Kombination -- der Normalfall, BEVOR ueberhaupt ein Sprach-Fallback in Betracht gezogen wird.
  * Historisch war das eine einzelne Query mit `t.slug = ? OR dt.slug = ?`, die (genau wie der
  * urspruengliche Fallback-Entwurf) bei zwei Dokumenten mit kollidierendem Slug in derselben
- * Sprache per ungeordnetem LIMIT 1 haette das falsche Dokument waehlen koennen. Nutzt jetzt
- * dieselbe find_unambiguous_match()-Disziplin wie find_public_translation_with_fallback():
- * kombinierte Query ueber dt.slug (nur Dokumente mit einer $lang-Uebersetzung) und t.slug (in
- * genau $lang), nur bei GENAU EINEM Treffer wird aufgeloest.
+ * Sprache per ungeordnetem LIMIT 1 haette das falsche Dokument waehlen koennen.
+ *
+ * Aufloesung in ZWEI PRIORITAETSSTUFEN (nicht als eine kombinierte Menge -- siehe
+ * find_public_translation_with_fallback() fuer die Begruendung, warum dt.slug bewusst Vorrang
+ * vor t.slug hat, auch wenn beide vorkommen):
+ * 1. dt.slug (kanonisch) -- eindeutigkeitsgeprueft ueber find_unambiguous_match(), gewinnt wenn
+ *    eindeutig, UNABHAENGIG davon, ob $slug zufaellig auch als jemandes Custom-Slug auftaucht.
+ * 2. Nur falls Stufe 1 nichts liefert: t.slug (benutzerdefiniert), ebenfalls eindeutigkeitsgeprueft.
  */
 function find_public_translation(PDO $db, int $projectId, string $lang, string $slug): ?array {
     $doc = find_unambiguous_match(
@@ -849,13 +853,19 @@ function find_public_translation(PDO $db, int $projectId, string $lang, string $
         "SELECT DISTINCT d.id FROM documents d
          JOIN doc_types dt ON d.doc_type_id = dt.id
          JOIN translations t ON t.document_id = d.id AND t.lang = ? AND t.status = 'published'
-         WHERE d.project_id = ? AND dt.slug = ?
-         UNION
-         SELECT DISTINCT d.id FROM translations t
-         JOIN documents d ON t.document_id = d.id
-         WHERE d.project_id = ? AND t.lang = ? AND t.slug = ? AND t.status = 'published'",
-        [$lang, $projectId, $slug, $projectId, $lang, $slug]
+         WHERE d.project_id = ? AND dt.slug = ?",
+        [$lang, $projectId, $slug]
     );
+
+    if (!$doc) {
+        $doc = find_unambiguous_match(
+            $db,
+            "SELECT DISTINCT d.id FROM translations t
+             JOIN documents d ON t.document_id = d.id
+             WHERE d.project_id = ? AND t.lang = ? AND t.slug = ? AND t.status = 'published'",
+            [$projectId, $lang, $slug]
+        );
+    }
 
     if (!$doc) {
         return null;
@@ -876,34 +886,38 @@ function find_public_translation(PDO $db, int $projectId, string $lang, string $
 /**
  * Findet eine oeffentlich auslieferbare Uebersetzung fuer $slug, wenn die exakt angefragte
  * $lang keine veroeffentlichte Version hat. Das Dokument wird ueber JEDE Sprache anhand des
- * Slugs identifiziert -- ueber BEIDE moeglichen Quellen in EINER kombinierten Abfrage (nicht
- * nacheinander gestaffelt), damit eine Mehrdeutigkeit ZWISCHEN den Quellen nicht uebersehen
- * wird (z. B. wenn der kanonische Doc-Type-Slug eines Dokuments zufaellig auch der
- * benutzerdefinierte Uebersetzungs-Slug eines ANDEREN, veroeffentlichten Dokuments ist):
+ * Slugs identifiziert, in zwei PRIORITAETSSTUFEN statt einer kombinierten Menge:
  *
- * - dt.slug: doc_types.slug hat ein UNIQUE-Constraint (der Doc-Type selbst ist projektweit
- *   eindeutig), aber documents(project_id, doc_type_id) ist NICHT UNIQUE -- deckt den Normalfall
- *   (Aufruf des kanonischen Doc-Type-Slugs, z. B. /fr/impressum) ab, garantiert aber fuer sich
- *   genommen keine Eindeutigkeit.
- * - t.slug: der benutzerdefinierte Uebersetzungs-Slug, NICHT global eindeutig (nur
- *   UNIQUE(document_id, lang)) -- zwei verschiedene Dokumente KOENNEN denselben eigenen Slug
- *   tragen.
- *
- * UNION dedupliziert automatisch, wenn beide Quellen zufaellig auf dasselbe Dokument zeigen
- * (haeufiger Normalfall: Standard-Vorlagen setzen den eigenen Slug meist gleich dem
- * Doc-Type-Slug) -- das zaehlt weiterhin als eindeutig. Matchen zwei verschiedene Dokumente
- * (egal ob beide ueber dieselbe Quelle oder je eine ueber dt.slug/t.slug), liefert
- * find_unambiguous_match() bewusst kein Ergebnis statt zu raten -- bei oeffentlichen
- * Rechtstexten ist das falsche Dokument auszuliefern schlimmer als ein 404.
+ * 1. dt.slug (kanonisch): doc_types.slug hat ein UNIQUE-Constraint (der Doc-Type selbst ist
+ *    projektweit eindeutig), aber documents(project_id, doc_type_id) ist NICHT UNIQUE --
+ *    trotzdem ueber find_unambiguous_match() geprueft statt blindem LIMIT 1. Findet Stufe 1
+ *    einen eindeutigen Treffer, WIRD ER VERWENDET, auch wenn derselbe Slug zufaellig auch als
+ *    benutzerdefinierter Slug eines VOELLIG ANDEREN Dokuments existiert (Stufe 2 wird dann gar
+ *    nicht erst abgefragt). Grund: der kanonische Slug ist ein strukturell garantiertes,
+ *    admin-vergebenes Merkmal des Doc-Types -- ein zufaellig gleichlautender Custom-Slug eines
+ *    fremden Dokuments ist so gut wie immer ein Tippfehler/Versehen der jeweiligen Redaktion,
+ *    nicht ein ernsthafter Anspruch auf denselben Slug. Diese Prioritaet ist zugleich wichtig
+ *    fuer render_public_overview(): deren Links zeigen IMMER auf dt.slug (siehe dort) und
+ *    duerfen sich nicht durch eine fremde Custom-Slug-Kollision in ein 404 verwandeln lassen,
+ *    obwohl die Uebersicht das verlinkte Dokument eindeutig kannte.
+ * 2. Nur falls Stufe 1 nichts liefert: t.slug (benutzerdefiniert). Der ist NICHT global eindeutig
+ *    (nur UNIQUE(document_id, lang)) -- zwei verschiedene Dokumente KOENNEN denselben eigenen
+ *    Slug tragen, daher ebenfalls ueber find_unambiguous_match() statt zu raten.
  */
 function find_public_translation_with_fallback(PDO $db, int $projectId, string $lang, string $slug, string $primaryLang): ?array {
     $doc = find_unambiguous_match(
         $db,
-        "SELECT DISTINCT d.id FROM documents d JOIN doc_types dt ON d.doc_type_id = dt.id WHERE d.project_id = ? AND dt.slug = ?
-         UNION
-         SELECT DISTINCT d.id FROM translations t JOIN documents d ON t.document_id = d.id WHERE d.project_id = ? AND t.slug = ? AND t.status = 'published'",
-        [$projectId, $slug, $projectId, $slug]
+        "SELECT DISTINCT d.id FROM documents d JOIN doc_types dt ON d.doc_type_id = dt.id WHERE d.project_id = ? AND dt.slug = ?",
+        [$projectId, $slug]
     );
+
+    if (!$doc) {
+        $doc = find_unambiguous_match(
+            $db,
+            "SELECT DISTINCT d.id FROM translations t JOIN documents d ON t.document_id = d.id WHERE d.project_id = ? AND t.slug = ? AND t.status = 'published'",
+            [$projectId, $slug]
+        );
+    }
 
     if (!$doc) {
         return null;
