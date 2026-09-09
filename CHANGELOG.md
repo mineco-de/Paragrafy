@@ -8,6 +8,34 @@ Die Versionsnummer folgt **CalVer** (`JAHR.MONAT.BUILD`) statt SemVer:
 jeden Monat wieder bei `1`. Änderungen vor `2026.9.1` sind nicht rückwirkend
 erfasst — siehe dafür die Git-Historie.
 
+## [2026.9.12] - 2026-09-09
+
+### Security / Added
+SSO-Härtung + optionales TOTP, als serverseitige Ergänzung zur bereits gemergten
+SaaS-seitigen SSO-Härtung (kürzere Token-TTL, `admin_password_login_disabled`-Flag):
+
+- **SSO-Nonce-Replay-Schutz**: Ein SSO-Login-Token (`/admin/sso?token=...`) lässt sich nicht
+  mehr mehrfach einlösen — die im Token enthaltene Nonce wird jetzt gegen eine neue
+  `sso_nonces`-Tabelle geprüft (atomares `INSERT`, UNIQUE-Constraint als Replay-Erkennung,
+  race-condition-sicher). Ein abgefangenes Token ist damit nur noch für den einen ersten
+  Login-Versuch innerhalb der TTL gültig.
+- **Admin-Passwort-Login sperrbar**: Bei `admin_password_login_disabled = true` in `config.php`
+  (von der SaaS-Schicht gesetzt) lehnt das klassische Admin-Passwort-Formular jeden Versuch ab —
+  der SSO-Pfad und der Login regulärer User-Accounts bleiben unberührt. Ohne das Feld
+  (Bestandsinstallationen) bleibt der Passwort-Login wie bisher offen.
+- **Optionales TOTP (RFC 6238)** für reguläre User-Accounts, und — nur auf Self-Hosted-Instanzen
+  ohne SSO — für den Admin-Account: Einrichtung per QR-Code (`spomky-labs/otphp` +
+  `endroid/qr-code`, neu über Composer eingebunden) unter **Admin → Sicherheit**, 10
+  einmalige Recovery-Codes, ±1-Zeitfenster-Toleranz gegen Uhr-Drift, Replay-Schutz je
+  Zeitschritt, dasselbe Rate-Limiting wie beim Passwort-Login. Auf Managed-Cloud-Instanzen wird
+  dem Admin-Account bewusst kein TOTP angeboten (Zugang läuft dort über SSO). Admin kann das
+  TOTP eines User-Accounts zurücksetzen (Benachrichtigungsmail + Audit-Log); für den
+  Admin-Account selbst gibt es dafür einen dokumentierten CLI-Notfallweg
+  (`bin/totp-reset-admin.php`, erfordert Server-Zugriff).
+- **Bare-Metal-Hinweis:** Dieses Release führt Composer als Build-Abhängigkeit ein
+  (`composer install` nach `git pull` nötig, siehe README) — Docker-Installationen erledigen das
+  automatisch beim Image-Build.
+
 ## [2026.9.11] - 2026-09-08
 
 ### Security

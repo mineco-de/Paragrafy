@@ -6,7 +6,7 @@ declare(strict_types=1);
 
 // CalVer: JAHR.MONAT.BUILD - BUILD zaehlt Releases innerhalb des Monats hoch (startet bei 1).
 // Siehe CHANGELOG.md fuer die Aenderungen je Version.
-define('PARAGRAFY_VERSION', '2026.9.11');
+define('PARAGRAFY_VERSION', '2026.9.12');
 define('PARAGRAFY_DIR', __DIR__);
 // Where persistent data (DB, config, backups, .env) lives. Defaults to the
 // code directory (bare-metal installs); set PARAGRAFY_DATA_DIR to point this
@@ -20,6 +20,8 @@ define('BACKUP_RETENTION_DAYS', 7);
 if (!is_dir(PARAGRAFY_DATA_DIR)) {
     @mkdir(PARAGRAFY_DATA_DIR, 0755, true);
 }
+
+require_once __DIR__ . '/totp.php';
 
 function load_env_file(): array {
     $env = [];
@@ -2628,6 +2630,9 @@ function render_sidebar(string $active, array $project, array $projects): string
     ];
     if (current_user_is_primary_admin()) {
         $items['users'] = ['/admin/users', t('admin.common.nav.users'), 'users'];
+    }
+    if (!current_user_is_primary_admin() || admin_totp_available()) {
+        $items['security'] = ['/admin/security?project_id=' . $project['id'], t('admin.common.nav.security'), 'shield'];
     }
     $items['audit'] = ['/admin/audit?project_id=' . $project['id'], t('admin.common.nav.audit'), 'clock'];
     $items['consent_log'] = ['/admin/consent-log?project_id=' . $project['id'], t('admin.common.nav.consent_log'), 'shield'];

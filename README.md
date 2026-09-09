@@ -148,13 +148,22 @@ The image is built from your local checkout (`COPY . /var/www/html/` in the Dock
 
 ### Option B: Apache / bare metal
 
-**1. Upload files & set permissions**
+**1. Upload files, install dependencies & set permissions**
 
 ```bash
+composer install --no-dev --optimize-autoloader
+
 sudo chown -R www-data:www-data /var/www/paragrafy
 sudo find /var/www/paragrafy -type d -exec chmod 755 {} +
 sudo find /var/www/paragrafy -type f -exec chmod 644 {} +
 ```
+
+`composer install` pulls in the TOTP two-factor auth libraries (`spomky-labs/otphp`,
+`endroid/qr-code`) into `vendor/` (not committed to the repo). Requires the PHP `sodium` and
+`gd` extensions — both are bundled with a stock PHP 8.2 install; `gd` may need
+`apt install php8.2-gd` on some distros. Without `vendor/` present, everything else keeps
+working — only the TOTP setup screen under **Admin → Security** shows a "not installed" hint
+instead of the QR code.
 
 **2. Apache VirtualHost**
 
@@ -216,7 +225,7 @@ Only the following values actually come from files instead of the database:
 
 | File / Variable | Purpose |
 | --- | --- |
-| `config.php` (auto-generated) | Admin password hash (legacy login) and the cron secret. Created by the setup wizard — don't edit manually. Optional: `project_limit` (int) caps the number of `projects` rows for this instance; if unset (default), there's no limit. Useful for operators running Paragrafy behind their own SaaS/billing layer with one instance per account/plan. |
+| `config.php` (auto-generated) | Admin password hash (legacy login) and the cron secret. Created by the setup wizard — don't edit manually. Optional: `project_limit` (int) caps the number of `projects` rows for this instance; if unset (default), there's no limit. Useful for operators running Paragrafy behind their own SaaS/billing layer with one instance per account/plan. Also self-heals a `totp_encryption_key` (random, generated on first TOTP setup, same pattern as the cron secret) used to encrypt TOTP secrets at rest — never edit or share this value, it's not a secret you're meant to configure. On self-hosted instances (no `sso_secret`), also holds the admin account's own optional `admin_totp_*` fields if 2FA is enabled for it — see [Two-Factor Authentication (TOTP)](#-two-factor-authentication-totp) below. |
 | `.env` / `.env.local` (optional) | `DEEPL_API_KEY=...` as a cross-project fallback if a project has no DeepL key of its own configured. Both files are optional — everything works without them except this fallback. |
 | `PARAGRAFY_DATA_DIR` (env variable) | Docker only: relocates `config.php`, the SQLite database, `/backups`, and `.env.local` into a persistent directory. See [Getting Started](#-getting-started) above. |
 
@@ -227,6 +236,18 @@ Only the following values actually come from files instead of the database:
 - The **public JSON API** (`/api/:lang/:slug`) is intentionally **unauthenticated and read-only** — legal texts should be retrievable from any connected website without credentials. There's no way to write or modify content through this API.
 - **Editing legal texts** is only possible through the logged-in `/admin` session (password or multi-user login) — there's no separate bearer-token/API-key API for write access.
 - **Cron endpoints** (`/api/cron/...`) require the `?secret=` query parameter described above (or an active admin session) and trigger server actions (backup, webhook delivery, publishing, audit email) — but never expose content or credentials.
+
+---
+
+## 🔒 Two-Factor Authentication (TOTP)
+
+Optional, per-account TOTP (RFC 6238) under **Admin → Security**, on top of the password:
+
+- **Regular user accounts** can always enable it — scan the QR code with any authenticator app (Google Authenticator, Aegis, 1Password, …), confirm with a live code before it's persisted, then save the 10 one-time recovery codes shown once. Recovery codes can be regenerated any time; disabling 2FA requires re-entering your password.
+- **The one admin account** (password-only, no email/username) can enable it too, but **only on self-hosted instances without SSO configured** (no `sso_secret` in `config.php`) — on Managed Cloud, admin access is enforced through SSO from the SaaS dashboard instead (see [Self-Hosted vs. Managed Cloud](#-self-hosted-vs-managed-cloud)), so a TOTP-protected password path there would guard an entrance nobody uses. If you want TOTP-protected day-to-day access on Managed Cloud, create a regular user account for that instead — the primary admin account stays reserved for SSO.
+- **Admin-side reset** (Admin → Users → the 2FA badge on a row) lets the primary admin reset a *regular user's* TOTP if they lose their device and their recovery codes — the affected user gets a notification email, and the reset is written to the audit log.
+- **The admin account has no reset-by-someone-else path** (nobody stands above it), so if a self-hosted admin loses their device *and* all recovery codes, the only way back in is `php bin/totp-reset-admin.php` — deliberately a server-access-only CLI command, not a web UI, since a web-reachable admin-TOTP reset would let anyone holding a stolen admin session strip 2FA without proving they actually have shell access to the box.
+- TOTP secrets are encrypted at rest (`sodium_crypto_secretbox`, key self-healed into `config.php` on first use); recovery codes are stored password-hashed, never in plaintext, and shown to you only once at generation time.
 
 ---
 
@@ -280,10 +301,10 @@ Viewable and exportable as CSV under **Admin → Consent Proof** (`/admin/consen
 Updates are straightforward — schema changes run automatically on the first request after updating:
 
 1. **Before updating:** create a backup (Settings → Backup & Export, or back up `/backups` for Docker).
-2. **Apache:** copy new files over the old ones, or `git pull` — don't overwrite/delete `config.php`, `paragrafy_data.sqlite`, or `/backups`.
-   **Docker:** `git pull` in your local checkout first, then `docker compose up -d --build` — the image is built from local code, so `--build` alone without a prior `git pull` still uses the old state. `config.php`, `paragrafy_data.sqlite`, `/backups`, and `.env.local` are preserved automatically via the `data` volume.
-3. On the next page load, `ensure_schema_migrations()` automatically creates any missing tables and columns (e.g. `users`, `audit_log`, `translation_versions`, `webhook_queue`, new columns on `projects`) — no manual migration script needed.
-4. Existing installations without a `cron_secret` in `config.php` get one generated automatically on the first call to a `/api/cron/...` endpoint (visible under Settings → Automation).
+2. **Apache:** copy new files over the old ones, or `git pull` — don't overwrite/delete `config.php`, `paragrafy_data.sqlite`, or `/backups`. Then run `composer install --no-dev --optimize-autoloader` (see [bare-metal setup](#option-b-apache--bare-metal) above) — needed since the 2FA release to pull in the TOTP libraries; harmless to re-run on every update either way.
+   **Docker:** `git pull` in your local checkout first, then `docker compose up -d --build` — the image is built from local code, so `--build` alone without a prior `git pull` still uses the old state. `config.php`, `paragrafy_data.sqlite`, `/backups`, and `.env.local` are preserved automatically via the `data` volume. `composer install` runs automatically as part of the image build, nothing to do manually.
+3. On the next page load, `ensure_schema_migrations()` automatically creates any missing tables and columns (e.g. `users`, `audit_log`, `translation_versions`, `webhook_queue`, `sso_nonces`, TOTP columns on `users`, new columns on `projects`) — no manual migration script needed.
+4. Existing installations without a `cron_secret` in `config.php` get one generated automatically on the first call to a `/api/cron/...` endpoint (visible under Settings → Automation). Same self-healing pattern for `totp_encryption_key`, generated the first time anyone sets up 2FA.
 
 There have been no breaking changes to date that require manual intervention beyond the automatic migration.
 
@@ -296,7 +317,8 @@ Paragrafy is fully open source (AGPL-3.0) and free to self-host with the complet
 | | Self-Hosted | Managed Cloud |
 |---|---|---|
 | Cost | Free, forever | From €7.99/month |
-| Feature set | Full | Full (identical) |
+| Feature set | Full | Full (identical for user accounts) |
+| Admin account access | Password login, optionally + TOTP | SSO from the SaaS dashboard (password login disabled, no TOTP needed) |
 | Infrastructure | Your own server, Docker or bare metal | Hosted for you, incl. SSL |
 | Data ownership | Fully yours | Yours, hosted by Paragrafy |
 | Support | Community (GitHub) | Included |
