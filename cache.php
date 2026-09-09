@@ -40,14 +40,20 @@ function public_cache_deploy_ts(): int {
 /**
  * Baut den ETag fuer ein oeffentlich ausgeliefertes Dokument. Fliessen ein:
  * PARAGRAFY_VERSION (ein Deploy mit geaendertem Rendering invalidiert automatisch alle
- * bisherigen ETags) sowie projects.settings_version (Projekt-Stammdaten wie Firmenname/
- * Adresse/Branding werden per replace_placeholders() bzw. direkt ins Template eingebettet).
+ * bisherigen ETags), projects.settings_version (Projekt-Stammdaten wie Firmenname/Adresse/
+ * Branding werden per replace_placeholders() bzw. direkt ins Template eingebettet) sowie
+ * $resolvedLang -- die TATSAECHLICH ausgelieferte Sprache, die sich bei Sprach-Fallbacks von
+ * $lang (der angefragten URL-Sprache) unterscheiden kann. Ohne $resolvedLang koennten zwei
+ * verschiedene Uebersetzungen desselben Slugs (z. B. ein EN-Fallback vs. eine spaeter echt
+ * veroeffentlichte FR-Version), die zufaellig denselben updated_at-Sekundenwert haben (etwa
+ * weil beide aus derselben Vorlage im selben Bulk-Vorgang angelegt wurden), denselben ETag
+ * erzeugen, obwohl der Inhalt unterschiedlich ist.
  * settings_version ist ein bei jedem UPDATE monoton hochgezaehlter Zaehler statt (nur) ein
  * DATETIME, damit zwei Aenderungen innerhalb derselben Sekunde (CURRENT_TIMESTAMP hat nur
  * Sekundenaufloesung in SQLite) trotzdem unterschiedliche Cache-Identitaeten erzeugen.
  */
-function build_public_cache_etag(int $projectId, string $lang, string $slug, string $updatedAt, int $projectSettingsVersion): string {
-    $hash = sha1($projectId . '|' . $lang . '|' . $slug . '|' . $updatedAt . '|' . $projectSettingsVersion . '|' . PARAGRAFY_VERSION);
+function build_public_cache_etag(int $projectId, string $lang, string $slug, string $updatedAt, int $projectSettingsVersion, string $resolvedLang): string {
+    $hash = sha1($projectId . '|' . $lang . '|' . $resolvedLang . '|' . $slug . '|' . $updatedAt . '|' . $projectSettingsVersion . '|' . PARAGRAFY_VERSION);
     return '"' . $hash . '"';
 }
 

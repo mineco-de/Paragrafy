@@ -821,19 +821,34 @@ function pick_fallback_translation(array $candidates, string $preferredLang, str
 /**
  * Findet eine oeffentlich auslieferbare Uebersetzung fuer $slug, wenn die exakt angefragte
  * $lang keine veroeffentlichte Version hat. Das Dokument wird ueber JEDE Sprache anhand des
- * Slugs identifiziert (t.slug ODER dt.slug, wie die Direkt-Query in index.php) -- dt.slug ist
- * doc-type-weit identisch, daher unabhaengig davon, welche Sprache letztlich passt.
+ * Slugs identifiziert, in zwei Schritten:
+ *
+ * 1. Ueber dt.slug (doc_types.slug hat ein UNIQUE-Constraint, also projektweit eindeutig und
+ *    unabhaengig von der Sprache) -- deckt den Normalfall (Aufruf des kanonischen Doc-Type-Slugs,
+ *    z. B. /fr/impressum) deterministisch und korrekt ab.
+ * 2. Nur falls das nichts findet: ueber den benutzerdefinierten Uebersetzungs-Slug (t.slug). Der
+ *    ist NICHT global eindeutig (nur UNIQUE(document_id, lang)) -- zwei verschiedene Dokumente
+ *    koennten in unterschiedlichen Sprachen zufaellig denselben eigenen Slug tragen. Deterministisch
+ *    nach document_id sortiert statt einem ungeordneten LIMIT 1 ueberlassen, um wenigstens stabil
+ *    (nicht zufaellig ein anderes Dokument) zu waehlen.
  */
 function find_public_translation_with_fallback(PDO $db, int $projectId, string $lang, string $slug, string $primaryLang): ?array {
-    $stmt = $db->prepare("
-        SELECT d.id FROM translations t
-        JOIN documents d ON t.document_id = d.id
-        JOIN doc_types dt ON d.doc_type_id = dt.id
-        WHERE d.project_id = ? AND (t.slug = ? OR dt.slug = ?) AND t.status = 'published'
-        LIMIT 1
-    ");
-    $stmt->execute([$projectId, $slug, $slug]);
+    $stmt = $db->prepare("SELECT d.id FROM documents d JOIN doc_types dt ON d.doc_type_id = dt.id WHERE d.project_id = ? AND dt.slug = ? LIMIT 1");
+    $stmt->execute([$projectId, $slug]);
     $doc = $stmt->fetch();
+
+    if (!$doc) {
+        $stmt = $db->prepare("
+            SELECT d.id FROM translations t
+            JOIN documents d ON t.document_id = d.id
+            WHERE d.project_id = ? AND t.slug = ? AND t.status = 'published'
+            ORDER BY d.id ASC
+            LIMIT 1
+        ");
+        $stmt->execute([$projectId, $slug]);
+        $doc = $stmt->fetch();
+    }
+
     if (!$doc) {
         return null;
     }
