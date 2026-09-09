@@ -57,6 +57,16 @@ function ensure_totp_encryption_key(): string {
         }
         return $config;
     });
+    if ($result === null) {
+        // update_config() only returns null here if the write itself failed
+        // (the mutator above never aborts on its own). Throwing a clear,
+        // catchable exception -- instead of dereferencing null and crashing
+        // with a confusing TypeError inside sodium_crypto_secretbox() --
+        // lets callers like the /admin/security handlers in admin.php catch
+        // it and show the same graceful "could not be saved" message they
+        // already show for a failed secret/recovery-code write.
+        throw new \RuntimeException('Could not persist totp_encryption_key to config.php.');
+    }
     return $result['totp_encryption_key'];
 }
 

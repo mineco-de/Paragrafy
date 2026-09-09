@@ -1125,12 +1125,20 @@ if (isset($_POST['action']) && $_POST['action'] === 'totp_setup_confirm') {
         exit;
     }
     $recoveryCodes = totp_generate_recovery_codes();
-    if (!totp_identity_complete_setup($db, $identity, totp_encrypt_secret($pendingSecret), totp_hash_recovery_codes($recoveryCodes))) {
-        // Write failed to persist -- do NOT show recovery codes or log
-        // "enabled": nothing was actually saved, so telling the user
-        // otherwise would make them believe the account is protected when
-        // it isn't. Leave $_SESSION['totp_setup']['secret'] in place so they
-        // can simply retry the confirmation.
+    try {
+        // totp_encrypt_secret() can itself throw if the totp_encryption_key
+        // couldn't be persisted on its first-ever use (see
+        // ensure_totp_encryption_key()) -- treat that exactly like
+        // totp_identity_complete_setup() returning false below: do NOT show
+        // recovery codes or log "enabled", nothing was actually saved, and
+        // telling the user otherwise would make them believe the account is
+        // protected when it isn't. Leave $_SESSION['totp_setup']['secret']
+        // in place so they can simply retry the confirmation.
+        $persisted = totp_identity_complete_setup($db, $identity, totp_encrypt_secret($pendingSecret), totp_hash_recovery_codes($recoveryCodes));
+    } catch (\RuntimeException $e) {
+        $persisted = false;
+    }
+    if (!$persisted) {
         header("Location: /admin/security?project_id=$projectId&msg=totp_setup_persist_failed");
         exit;
     }
