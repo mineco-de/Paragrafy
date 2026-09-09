@@ -198,7 +198,7 @@ if ($isPreview) {
     $etagHash = trim($etag, '"');
     $lastMod = build_public_last_modified($trans['updated_at'], (string)($project['settings_updated_at'] ?? ''));
 
-    if (check_conditional_request($etag, $lastMod, allowLastModifiedOnly: $fallbackFromLang === null)) {
+    if (check_conditional_request($etag, $lastMod)) {
         exit;
     }
 
@@ -504,7 +504,7 @@ function handle_json_api(array $parts, array $project, PDO $db, string $primaryL
         $etagHash = trim($etag, '"');
         $lastMod = build_public_last_modified($doc['updated_at'], (string)($project['settings_updated_at'] ?? ''));
 
-        if (check_conditional_request($etag, $lastMod, allowLastModifiedOnly: $fallbackFromLang === null)) {
+        if (check_conditional_request($etag, $lastMod)) {
             return;
         }
 

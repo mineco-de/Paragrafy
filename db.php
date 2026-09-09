@@ -819,37 +819,49 @@ function pick_fallback_translation(array $candidates, string $preferredLang, str
 }
 
 /**
+ * Fuehrt $sql aus und liefert die einzige Ergebniszeile zurueck -- aber nur, wenn GENAU EIN
+ * Treffer existiert. Bei 0 oder >=2 Treffern wird bewusst null geliefert statt zu raten (per
+ * LIMIT 2 reicht ein zweiter Treffer schon, um "mehrdeutig" zu erkennen, ohne alle Zeilen zu
+ * laden). Bei oeffentlichen Rechtstexten ist das falsche Dokument auszuliefern schlimmer als
+ * ein 404 -- diese Funktion setzt "nicht eindeutig = kein Treffer" konsequent durch, statt es
+ * an jeder Aufrufstelle einzeln (und ggf. inkonsistent) zu pruefen.
+ */
+function find_unambiguous_match(PDO $db, string $sql, array $params): ?array {
+    $stmt = $db->prepare($sql . ' LIMIT 2');
+    $stmt->execute($params);
+    $matches = $stmt->fetchAll();
+    return count($matches) === 1 ? $matches[0] : null;
+}
+
+/**
  * Findet eine oeffentlich auslieferbare Uebersetzung fuer $slug, wenn die exakt angefragte
  * $lang keine veroeffentlichte Version hat. Das Dokument wird ueber JEDE Sprache anhand des
- * Slugs identifiziert, in zwei Schritten:
+ * Slugs identifiziert, in zwei Schritten, beide ueber find_unambiguous_match() (siehe dort --
+ * kein Raten bei mehrdeutigen Treffern):
  *
- * 1. Ueber dt.slug (doc_types.slug hat ein UNIQUE-Constraint, also projektweit eindeutig und
- *    unabhaengig von der Sprache) -- deckt den Normalfall (Aufruf des kanonischen Doc-Type-Slugs,
- *    z. B. /fr/impressum) deterministisch und korrekt ab.
+ * 1. Ueber dt.slug. doc_types.slug hat zwar ein UNIQUE-Constraint (der Doc-Type selbst ist also
+ *    projektweit eindeutig ansprechbar), aber documents(project_id, doc_type_id) ist NICHT
+ *    UNIQUE -- theoretisch koennten also mehrere documents-Zeilen desselben Doc-Types im selben
+ *    Projekt existieren. Deckt den Normalfall (Aufruf des kanonischen Doc-Type-Slugs, z. B.
+ *    /fr/impressum) ab, aber eben nicht garantiert eindeutig, daher ebenfalls ueber
+ *    find_unambiguous_match() statt einem blinden LIMIT 1.
  * 2. Nur falls das nichts findet: ueber den benutzerdefinierten Uebersetzungs-Slug (t.slug). Der
  *    ist NICHT global eindeutig (nur UNIQUE(document_id, lang)) -- zwei verschiedene Dokumente
- *    KOENNEN also denselben eigenen Slug tragen. Bei Rechtstexten ist ein falsch zugeordnetes
- *    Dokument (z. B. die AGB eines anderen Dokuments statt der angefragten) schlimmer als ein
- *    404 -- deshalb wird hier NICHT geraten: nur wenn GENAU EIN Dokument ueber diesen Slug
- *    matcht, wird er verwendet; matchen zwei oder mehr Dokumente denselben Slug, bleibt die
- *    Aufloesung absichtlich erfolglos (kein Treffer), statt eine der Optionen willkuerlich
- *    auszuwaehlen.
+ *    KOENNEN also denselben eigenen Slug tragen.
  */
 function find_public_translation_with_fallback(PDO $db, int $projectId, string $lang, string $slug, string $primaryLang): ?array {
-    $stmt = $db->prepare("SELECT d.id FROM documents d JOIN doc_types dt ON d.doc_type_id = dt.id WHERE d.project_id = ? AND dt.slug = ? LIMIT 1");
-    $stmt->execute([$projectId, $slug]);
-    $doc = $stmt->fetch();
+    $doc = find_unambiguous_match(
+        $db,
+        "SELECT DISTINCT d.id FROM documents d JOIN doc_types dt ON d.doc_type_id = dt.id WHERE d.project_id = ? AND dt.slug = ?",
+        [$projectId, $slug]
+    );
 
     if (!$doc) {
-        $stmt = $db->prepare("
-            SELECT DISTINCT d.id FROM translations t
-            JOIN documents d ON t.document_id = d.id
-            WHERE d.project_id = ? AND t.slug = ? AND t.status = 'published'
-            LIMIT 2
-        ");
-        $stmt->execute([$projectId, $slug]);
-        $matches = $stmt->fetchAll();
-        $doc = count($matches) === 1 ? $matches[0] : null;
+        $doc = find_unambiguous_match(
+            $db,
+            "SELECT DISTINCT d.id FROM translations t JOIN documents d ON t.document_id = d.id WHERE d.project_id = ? AND t.slug = ? AND t.status = 'published'",
+            [$projectId, $slug]
+        );
     }
 
     if (!$doc) {

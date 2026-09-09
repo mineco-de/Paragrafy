@@ -77,21 +77,26 @@ function build_public_last_modified(string $updatedAtSql, string $projectUpdated
 }
 
 /**
- * Wertet If-None-Match / If-Modified-Since gegen den aktuellen ETag/Last-Modified
- * aus. Setzt IMMER zuerst ETag/Last-Modified/Cache-Control (auch bei 304 laut RFC
- * 7232 Sec. 4.1 vorgeschrieben). Bei Match wird der 304-Status gesetzt und true
- * zurueckgegeben - der Aufrufer muss dann selbst exit/return ohne Body ausloesen.
+ * Wertet If-None-Match gegen den aktuellen ETag aus. Setzt IMMER zuerst ETag/Last-Modified/
+ * Cache-Control (auch bei 304 laut RFC 7232 Sec. 4.1 vorgeschrieben). Bei Match wird der
+ * 304-Status gesetzt und true zurueckgegeben - der Aufrufer muss dann selbst exit/return
+ * ohne Body ausloesen.
  *
- * $allowLastModifiedOnly=false deaktiviert den If-Modified-Since-Zweig komplett (nur
- * If-None-Match/ETag kann dann noch 304 ausloesen). Wird bei Sprach-Fallback-Antworten
- * genutzt: die aufgeloeste Uebersetzung kann sich zwischen zwei Requests aendern (z. B.
- * wenn das bisher per Fallback gewaehlte Dokument depubliziert wird), ohne dass sich der
- * Last-Modified-Wert zwingend nach vorne bewegt (Sekundenaufloesung, mehrere Freshness-
- * Signale). Der ETag deckt diesen Fall bereits zuverlaessig ab (enthaelt translations.id),
- * ein reiner Datums-Vergleich ohne ETag-Unterstuetzung aber nicht -- also lieber einmal zu
- * oft frisch rendern als faelschlich 304 auf bereits ueberholten Fallback-Content liefern.
+ * If-Modified-Since wird bewusst NICHT als alleiniger Validator akzeptiert (nur If-None-Match/
+ * ETag kann 304 ausloesen), obwohl der Last-Modified-Header weiterhin gesendet wird. Grund:
+ * Sprach-Fallbacks koennen dazu fuehren, dass sich die fuer ein und denselben (Sprache, Slug)-
+ * Aufruf ausgelieferte Identitaet zwischen zwei Requests aendert (z. B. Uebergang von einer
+ * EN-Fallback-Antwort zu einer inzwischen echt veroeffentlichten FR-Version, oder umgekehrt
+ * bei Depublizierung) -- und Last-Modified (Sekundenaufloesung, mehrere ueberlagerte Freshness-
+ * Signale je nach Herkunft) garantiert dabei keine strikt aufsteigende Reihenfolge relativ zu
+ * einem beim Client zwischengespeicherten aelteren Last-Modified-Wert. Der ETag (enthaelt
+ * translations.id, also die tatsaechliche Identitaet der ausgelieferten Zeile) ist der einzige
+ * Validator, der diese Faelle zuverlaessig unterscheidet. Ein Client, der ausschliesslich
+ * If-Modified-Since ohne ETag-Unterstuetzung nutzt, bekommt dadurch immer eine frische Antwort
+ * statt eines potenziell faelschlichen 304 -- korrekt ist wichtiger als maximale Cache-Trefferquote
+ * fuer diese seltene Client-Klasse.
  */
-function check_conditional_request(string $etag, int $lastModifiedTs, int $maxAge = PUBLIC_CACHE_MAX_AGE_SECONDS, bool $allowLastModifiedOnly = true): bool {
+function check_conditional_request(string $etag, int $lastModifiedTs, int $maxAge = PUBLIC_CACHE_MAX_AGE_SECONDS): bool {
     header('ETag: ' . $etag);
     header('Last-Modified: ' . gmdate('D, d M Y H:i:s', $lastModifiedTs) . ' GMT');
     header('Cache-Control: public, max-age=' . $maxAge . ', must-revalidate');
@@ -111,16 +116,6 @@ function check_conditional_request(string $etag, int $lastModifiedTs, int $maxAg
                 http_response_code(304);
                 return true;
             }
-        }
-        return false;
-    }
-
-    $ifModifiedSince = $_SERVER['HTTP_IF_MODIFIED_SINCE'] ?? '';
-    if ($allowLastModifiedOnly && $ifModifiedSince !== '') {
-        $since = strtotime($ifModifiedSince);
-        if ($since !== false && $lastModifiedTs <= $since) {
-            http_response_code(304);
-            return true;
         }
     }
 
