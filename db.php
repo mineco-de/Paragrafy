@@ -102,14 +102,15 @@ function update_config(callable $mutator): ?array {
     }
     $lockHandle = fopen(PARAGRAFY_DATA_DIR . '/config.lock', 'c');
     if ($lockHandle === false || !flock($lockHandle, LOCK_EX)) {
-        // Lock file couldn't be opened/locked (e.g. read-only filesystem edge
-        // case) -- fall back to a best-effort, non-atomic write rather than
-        // hard-failing the whole request.
-        $config = $mutator(get_config());
-        if ($config === null || !write_config($config)) {
-            return null;
-        }
-        return $config;
+        // Fail closed, not open: falling back to an unlocked read-modify-
+        // write here would silently reintroduce the exact race this
+        // function exists to prevent (e.g. two logins consuming the same
+        // admin TOTP step/recovery code) for every caller that trusts a
+        // non-null return as proof of atomic, durable consumption. A lock
+        // acquisition failure is an environment problem (unwritable data
+        // dir, a filesystem without flock support) the operator needs to
+        // know about -- not something to paper over with weaker semantics.
+        throw new \RuntimeException('Could not acquire config.lock for an atomic config update.');
     }
     try {
         $config = file_exists(CONFIG_FILE) ? (require CONFIG_FILE) : [];
