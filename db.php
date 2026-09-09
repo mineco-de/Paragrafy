@@ -6,7 +6,7 @@ declare(strict_types=1);
 
 // CalVer: JAHR.MONAT.BUILD - BUILD zaehlt Releases innerhalb des Monats hoch (startet bei 1).
 // Siehe CHANGELOG.md fuer die Aenderungen je Version.
-define('PARAGRAFY_VERSION', '2026.9.12');
+define('PARAGRAFY_VERSION', '2026.9.13');
 define('PARAGRAFY_DIR', __DIR__);
 // Where persistent data (DB, config, backups, .env) lives. Defaults to the
 // code directory (bare-metal installs); set PARAGRAFY_DATA_DIR to point this
@@ -246,7 +246,9 @@ function ensure_schema_migrations(PDO $pdo): void {
                 'consent_logging_enabled' => "INTEGER DEFAULT 0",
                 'consent_log_retention_days' => "INTEGER DEFAULT 1095",
                 'ai_provider' => "TEXT DEFAULT ''",
-                'ai_api_key' => "TEXT DEFAULT ''"
+                'ai_api_key' => "TEXT DEFAULT ''",
+                'settings_updated_at' => "DATETIME DEFAULT CURRENT_TIMESTAMP",
+                'settings_version' => "INTEGER NOT NULL DEFAULT 1"
             ];
             foreach ($newCols as $c => $type) {
                 if (!in_array($c, $colNames)) {
@@ -1152,6 +1154,12 @@ function update_project_company_fields(PDO $db, int $projectId, array $fields): 
     if (empty($sets)) {
         return;
     }
+    // Strikt hochzaehlen statt CURRENT_TIMESTAMP (s. admin.php-Settings-Save fuer die
+    // ausfuehrliche Begruendung): verhindert, dass zwei Projekt-Updates in derselben Sekunde
+    // (z. B. Einlesemodus direkt gefolgt von einem manuellen Admin-Save) denselben
+    // Last-Modified-Wert erzeugen.
+    $sets[] = "settings_updated_at = CASE WHEN datetime('now') > settings_updated_at THEN datetime('now') ELSE datetime(settings_updated_at, '+1 second') END";
+    $sets[] = "settings_version = settings_version + 1";
     $params[] = $projectId;
     $stmt = $db->prepare("UPDATE projects SET " . implode(', ', $sets) . " WHERE id = ?");
     $stmt->execute($params);
@@ -2140,6 +2148,8 @@ function export_project_backup(PDO $db, int $projectId): array {
                 ai_provider TEXT DEFAULT '', ai_api_key TEXT DEFAULT '',
                 company_name TEXT DEFAULT '', address TEXT DEFAULT '', email TEXT DEFAULT '',
                 phone TEXT DEFAULT '', representative TEXT DEFAULT '', register_info TEXT DEFAULT '',
+                settings_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                settings_version INTEGER NOT NULL DEFAULT 1,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE doc_types (

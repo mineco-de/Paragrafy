@@ -8,6 +8,29 @@ Die Versionsnummer folgt **CalVer** (`JAHR.MONAT.BUILD`) statt SemVer:
 jeden Monat wieder bei `1`. Änderungen vor `2026.9.1` sind nicht rückwirkend
 erfasst — siehe dafür die Git-Historie.
 
+## [2026.9.13] - 2026-09-09
+
+### Added
+HTTP-Caching für die öffentliche Rechtstexte-Auslieferung (Public Viewer + JSON-API), damit
+Traffic-Spitzen (z. B. viral gehende Kunden-Websites) nicht bei jedem Request die SQLite-
+Instanz-DB und das volle Rendering treffen:
+
+- **ETag + Last-Modified**: Beide Header werden aus `project_id + lang + slug + updated_at`
+  (plus App-Version als Salt) gebildet und bei jeder Antwort gesetzt. Eingehende
+  `If-None-Match`/`If-Modified-Since`-Header werden ausgewertet — bei Treffer liefert die
+  Route `304 Not Modified`, ohne den Content zu rendern.
+- **`Cache-Control: public, max-age=300, must-revalidate`** für veröffentlichte Dokumente,
+  auch nutzbar ohne Cloudflare-Proxy vor Custom-Domains. Vorschau-Antworten (`/…/preview`)
+  bleiben unangetastet `private, no-store` und werden nie per ETag/304 kurzgeschlossen.
+- **Optionaler Datei-Cache** (`cache.php`, per `PARAGRAFY_PUBLIC_CACHE=0` abschaltbar): legt
+  fertig gerendertes HTML/JSON instanz- und mandanten-isoliert unter
+  `PARAGRAFY_DATA_DIR/cache/public/{project_id}/…` ab (nicht öffentlich per URL erreichbar,
+  zusätzlich per `.htaccess` gesperrt). Der Cache-Key enthält den `updated_at`-Hash, eine neue
+  Dokumentversion erzeugt automatisch einen neuen Eintrag; alte Dateien werden opportunistisch
+  (bei ~1 % der Schreibzugriffe) oder per neuem `/api/cron/cache-cleanup`-Endpoint rotiert.
+  Personenbezogene Platzhalter (Impressum-Adresse etc.) landen dadurch nie mandantenübergreifend
+  im selben Cache-Eintrag.
+
 ## [2026.9.12] - 2026-09-09
 
 ### Security / Added

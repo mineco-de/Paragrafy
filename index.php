@@ -8,6 +8,7 @@ ini_set('log_errors', '1');
 error_reporting(E_ALL);
 
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/cache.php';
 if (session_status() === PHP_SESSION_NONE) {
     $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
     session_set_cookie_params(['lifetime' => 0, 'path' => '/', 'secure' => $isHttps, 'httponly' => true, 'samesite' => 'Lax']);
@@ -52,6 +53,15 @@ if ($uri === '/api/cron/publish') {
     require_cron_secret();
     header('Content-Type: application/json');
     echo json_encode(check_and_publish_scheduled(get_db()));
+    exit;
+}
+
+// Alte Public-Cache-Dateien aufräumen -- optional, per externem Cron; der File-Cache
+// rotiert auch ohne dies opportunistisch bei Schreibzugriffen (siehe cache.php).
+if ($uri === '/api/cron/cache-cleanup') {
+    require_cron_secret();
+    header('Content-Type: application/json');
+    echo json_encode(['deleted' => public_cache_cleanup_all()]);
     exit;
 }
 
@@ -161,6 +171,7 @@ if (!$trans) {
 }
 
 $liveSlug = $trans['slug'];
+$etagHash = null;
 
 if ($isPreview) {
     if (empty($trans['scheduled_at'])) {
@@ -168,11 +179,26 @@ if ($isPreview) {
         render_public_404($project, $lang);
         exit;
     }
+    header('Cache-Control: private, no-store');
     $trans['title'] = $trans['scheduled_title'] !== '' ? $trans['scheduled_title'] : $trans['title'];
     $trans['slug'] = $trans['scheduled_slug'] !== '' ? $trans['scheduled_slug'] : $trans['slug'];
     $previewContent = $trans['scheduled_content'] !== '' ? $trans['scheduled_content'] : $trans['content'];
 } else {
     $previewContent = $trans['content'];
+
+    $etag = build_public_cache_etag((int)$project['id'], $lang, $liveSlug, $trans['updated_at'], (int)($project['settings_version'] ?? 1));
+    $etagHash = trim($etag, '"');
+    $lastMod = build_public_last_modified($trans['updated_at'], (string)($project['settings_updated_at'] ?? ''));
+
+    if (check_conditional_request($etag, $lastMod)) {
+        exit;
+    }
+
+    $cachedHtml = public_cache_get((int)$project['id'], 'html', $lang, $liveSlug, $etagHash);
+    if ($cachedHtml !== null) {
+        echo public_cache_fill_dynamic($cachedHtml);
+        exit;
+    }
 }
 
 $stmt = $db->prepare("
@@ -186,7 +212,15 @@ $stmt->execute([$trans['document_id']]);
 $languages = $stmt->fetchAll();
 
 $content = replace_placeholders(sanitize_legal_html($previewContent), $project);
+
+ob_start();
 render_public_document($project, $trans, $content, $languages, $lang, $isPreview, $liveSlug);
+$html = ob_get_clean();
+
+if (!$isPreview) {
+    public_cache_put((int)$project['id'], 'html', $lang, $liveSlug, $etagHash, $html);
+}
+echo public_cache_fill_dynamic($html);
 
 function get_i18n_strings(string $lang): array {
     $dict = [
@@ -431,15 +465,32 @@ function handle_json_api(array $parts, array $project, PDO $db, string $primaryL
         return;
     }
 
+    $etagHash = null;
+
     if ($isPreview) {
         if (empty($doc['scheduled_at'])) {
             http_response_code(404);
             echo json_encode(['error' => 'No scheduled preview available for this document']);
             return;
         }
+        header('Cache-Control: private, no-store');
         $doc['title'] = $doc['scheduled_title'] !== '' ? $doc['scheduled_title'] : $doc['title'];
         $doc['slug'] = $doc['scheduled_slug'] !== '' ? $doc['scheduled_slug'] : $doc['slug'];
         $doc['content'] = $doc['scheduled_content'] !== '' ? $doc['scheduled_content'] : $doc['content'];
+    } else {
+        $etag = build_public_cache_etag((int)$project['id'], $lang, $doc['slug'], $doc['updated_at'], (int)($project['settings_version'] ?? 1));
+        $etagHash = trim($etag, '"');
+        $lastMod = build_public_last_modified($doc['updated_at'], (string)($project['settings_updated_at'] ?? ''));
+
+        if (check_conditional_request($etag, $lastMod)) {
+            return;
+        }
+
+        $cachedJson = public_cache_get((int)$project['id'], 'json', $lang, $doc['slug'], $etagHash);
+        if ($cachedJson !== null) {
+            echo $cachedJson;
+            return;
+        }
     }
 
     $doc['rendered_html'] = replace_placeholders(sanitize_legal_html($doc['content']), $project);
@@ -456,7 +507,29 @@ function handle_json_api(array $parts, array $project, PDO $db, string $primaryL
     if ($isPreview) {
         $response['effective_date'] = date('c', strtotime($doc['scheduled_at']));
     }
-    echo json_encode($response, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+    $json = json_encode($response, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+
+    if (!$isPreview && $json !== false) {
+        public_cache_put((int)$project['id'], 'json', $lang, $doc['slug'], $etagHash, $json);
+    }
+
+    echo $json;
+}
+
+/**
+ * render_public_document() enthaelt zwei Stellen, die trotz gleichem $trans['updated_at']
+ * pro Request unterschiedlich sein koennen (aktuelles Jahr im Footer, UI-Locale-Switcher
+ * inkl. $_GET-Query). Damit der File-Cache trotzdem die vollstaendige Seite als String
+ * speichern kann, rendert render_public_document() an diesen Stellen Sentinel-Tokens statt
+ * der Live-Werte; diese Funktion ersetzt sie unmittelbar vor der Auslieferung (egal ob der
+ * HTML-String frisch gerendert oder aus dem Datei-Cache gelesen wurde).
+ */
+function public_cache_fill_dynamic(string $html): string {
+    return str_replace(
+        ['__CACHE_YEAR__', '__CACHE_LOCALE_SWITCHER__'],
+        [date('Y'), render_locale_switcher()],
+        $html
+    );
 }
 
 function render_public_document(array $project, array $trans, string $content, array $languages, string $currentLang, bool $isPreview = false, ?string $liveSlug = null): void {
@@ -601,8 +674,8 @@ function render_public_document(array $project, array $trans, string $content, a
         </div>
 
         <footer>
-            &copy; <?= date('Y') ?> <?= htmlspecialchars($project['company_name'] ?: $project['name']) ?> &bull; <?= htmlspecialchars($i18n['powered_by_footer']) ?>
-            <?= render_locale_switcher() ?>
+            &copy; __CACHE_YEAR__ <?= htmlspecialchars($project['company_name'] ?: $project['name']) ?> &bull; <?= htmlspecialchars($i18n['powered_by_footer']) ?>
+            __CACHE_LOCALE_SWITCHER__
         </footer>
 
         <script>
