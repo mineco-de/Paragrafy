@@ -194,7 +194,7 @@ if ($isPreview) {
 } else {
     $previewContent = $trans['content'];
 
-    $etag = build_public_cache_etag((int)$project['id'], $lang, $liveSlug, $trans['updated_at'], (int)($project['settings_version'] ?? 1), $trans['lang']);
+    $etag = build_public_cache_etag((int)$project['id'], $lang, $liveSlug, $trans['updated_at'], (int)($project['settings_version'] ?? 1), $trans['lang'], (int)$trans['id']);
     $etagHash = trim($etag, '"');
     $lastMod = build_public_last_modified($trans['updated_at'], (string)($project['settings_updated_at'] ?? ''));
 
@@ -463,7 +463,7 @@ function handle_json_api(array $parts, array $project, PDO $db, string $primaryL
     }
 
     $stmt = $db->prepare("
-        SELECT t.title, t.slug, t.lang, t.content, t.updated_at, t.change_note, t.scheduled_at, t.scheduled_title, t.scheduled_slug, t.scheduled_content
+        SELECT t.id, t.title, t.slug, t.lang, t.content, t.updated_at, t.change_note, t.scheduled_at, t.scheduled_title, t.scheduled_slug, t.scheduled_content
         FROM translations t
         JOIN documents d ON t.document_id = d.id
         JOIN doc_types dt ON d.doc_type_id = dt.id
@@ -500,7 +500,7 @@ function handle_json_api(array $parts, array $project, PDO $db, string $primaryL
         $doc['slug'] = $doc['scheduled_slug'] !== '' ? $doc['scheduled_slug'] : $doc['slug'];
         $doc['content'] = $doc['scheduled_content'] !== '' ? $doc['scheduled_content'] : $doc['content'];
     } else {
-        $etag = build_public_cache_etag((int)$project['id'], $lang, $doc['slug'], $doc['updated_at'], (int)($project['settings_version'] ?? 1), $doc['lang']);
+        $etag = build_public_cache_etag((int)$project['id'], $lang, $doc['slug'], $doc['updated_at'], (int)($project['settings_version'] ?? 1), $doc['lang'], (int)$doc['id']);
         $etagHash = trim($etag, '"');
         $lastMod = build_public_last_modified($doc['updated_at'], (string)($project['settings_updated_at'] ?? ''));
 
