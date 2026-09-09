@@ -51,19 +51,43 @@ function is_installed(): bool {
     return file_exists(CONFIG_FILE) && file_exists(DB_FILE);
 }
 
+/** Shared in-process cache backing get_config()/write_config() (see write_config() for why). */
+function &config_cache_ref(): ?array {
+    static $cache = null;
+    return $cache;
+}
+
 function get_config(): array {
+    $cache = &config_cache_ref();
+    if ($cache !== null) {
+        return $cache;
+    }
     if (!file_exists(CONFIG_FILE)) {
         return [];
     }
-    return require CONFIG_FILE;
+    $cache = require CONFIG_FILE;
+    return $cache;
 }
 
+/**
+ * Writes config.php and keeps the in-process cache in sync so a get_config()
+ * call later in the *same* request immediately sees this write. Without this,
+ * two write_config() calls in one request (e.g. TOTP setup persisting the
+ * secret, then the recovery codes, in two separate get_config()+write_config()
+ * round-trips) can clobber each other: PHP's `require` re-parses the file on
+ * every call, but with opcache enabled the bytecode isn't guaranteed to be
+ * revalidated against disk within the same request/revalidate_freq window --
+ * the second write_config() could start from a get_config() that still
+ * reflects the pre-first-write state and overwrite it.
+ */
 function write_config(array $config): void {
     if (!is_dir(PARAGRAFY_DATA_DIR)) {
         mkdir(PARAGRAFY_DATA_DIR, 0755, true);
     }
     $content = "<?php\nreturn " . var_export($config, true) . ";\n";
     file_put_contents(CONFIG_FILE, $content);
+    $cache = &config_cache_ref();
+    $cache = $config;
 }
 
 /** Returns the shared secret for the /api/cron/* endpoints, generating one on first use (self-healing for installs from before this existed). */
@@ -250,7 +274,14 @@ function ensure_schema_migrations(PDO $pdo): void {
                 status TEXT DEFAULT 'invited',
                 invite_token TEXT DEFAULT '',
                 invited_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                activated_at DATETIME DEFAULT NULL
+                activated_at DATETIME DEFAULT NULL,
+                locale TEXT DEFAULT 'de',
+                notes TEXT DEFAULT '',
+                invite_token_expires_at DATETIME DEFAULT NULL,
+                totp_secret TEXT NULL,
+                totp_enabled_at DATETIME NULL,
+                totp_recovery_codes TEXT NULL,
+                totp_last_used_step INTEGER NULL
             );
         ");
 

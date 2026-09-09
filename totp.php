@@ -15,13 +15,20 @@
  */
 declare(strict_types=1);
 
+// Loaded unconditionally (not lazily inside totp_vendor_available()) so every
+// function below can safely reference \OTPHP\... / \Endroid\... regardless of
+// call order -- a function calling e.g. totp_generate_secret() without having
+// called totp_vendor_available() first must not fatal-error just because the
+// autoloader hadn't been pulled in yet as a side effect.
+$totpAutoload = PARAGRAFY_DIR . '/vendor/autoload.php';
+if (file_exists($totpAutoload)) {
+    require_once $totpAutoload;
+}
+unset($totpAutoload);
+
 function totp_vendor_available(): bool {
     static $available = null;
     if ($available === null) {
-        $autoload = PARAGRAFY_DIR . '/vendor/autoload.php';
-        if (file_exists($autoload)) {
-            require_once $autoload;
-        }
         $available = class_exists(\OTPHP\TOTP::class) && class_exists(\Endroid\QrCode\Builder\Builder::class) && function_exists('sodium_crypto_secretbox');
     }
     return $available;
@@ -204,7 +211,11 @@ function totp_identity_enabled(array $identity): bool {
 }
 
 function totp_identity_label(array $identity, array $project): string {
-    return $identity['type'] === 'user' ? ('Paragrafy:' . $identity['row']['email']) : ('Paragrafy Admin (' . $project['domain'] . ')');
+    // otphp rejects a colon in the label (it's the separator it inserts
+    // itself between issuer and label in the otpauth:// URI) -- the email
+    // alone is already a unique, recognizable label once combined with the
+    // issuer set via totp_identity_issuer().
+    return $identity['type'] === 'user' ? $identity['row']['email'] : ('Paragrafy Admin (' . $project['domain'] . ')');
 }
 
 function totp_identity_issuer(array $identity, array $project): string {
