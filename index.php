@@ -136,14 +136,14 @@ if (!empty($parts) && $parts[0] === 'api') {
 }
 
 if (empty($parts)) {
-    render_public_overview($project, $db, $primaryLang);
+    render_public_overview($project, $db, $primaryLang, $primaryLang);
     exit;
 }
 
 if (count($parts) === 1) {
     $first = strtolower($parts[0]);
     if (in_array($first, $activeLangs) || (strlen($first) === 2 && !is_numeric($first))) {
-        render_public_overview($project, $db, $first);
+        render_public_overview($project, $db, $first, $primaryLang);
         exit;
     }
     $lang = $primaryLang;
@@ -163,6 +163,14 @@ $stmt = $db->prepare("
 ");
 $stmt->execute([$project['id'], $lang, $slug, $slug]);
 $trans = $stmt->fetch();
+
+$fallbackFromLang = null;
+if (!$trans && !$isPreview) {
+    $trans = find_public_translation_with_fallback($db, (int)$project['id'], $lang, $slug, $primaryLang);
+    if ($trans) {
+        $fallbackFromLang = $lang;
+    }
+}
 
 if (!$trans) {
     http_response_code(404);
@@ -214,7 +222,7 @@ $languages = $stmt->fetchAll();
 $content = replace_placeholders(sanitize_legal_html($previewContent), $project);
 
 ob_start();
-render_public_document($project, $trans, $content, $languages, $lang, $isPreview, $liveSlug);
+render_public_document($project, $trans, $content, $languages, $trans['lang'], $isPreview, $liveSlug, $fallbackFromLang);
 $html = ob_get_clean();
 
 if (!$isPreview) {
@@ -243,7 +251,8 @@ function get_i18n_strings(string $lang): array {
             'upcoming_banner_text' => 'Geplante Neufassung verfügbar: Diese Bestimmungen werden zum %s aktualisiert.',
             'upcoming_banner_link' => 'Vorab ansehen &rarr;',
             'powered_by_toc' => 'Bereitgestellt mit Paragrafy',
-            'powered_by_footer' => 'Bereitgestellt über Paragrafy'
+            'powered_by_footer' => 'Bereitgestellt über Paragrafy',
+            'lang_fallback_notice' => 'Dieser Text liegt aktuell nicht auf %s vor — hier die verfügbare Version.'
         ],
         'en' => [
             'toc' => 'Table of Contents',
@@ -264,7 +273,8 @@ function get_i18n_strings(string $lang): array {
             'upcoming_banner_text' => 'Upcoming revision available: these terms will be updated on %s.',
             'upcoming_banner_link' => 'Preview now &rarr;',
             'powered_by_toc' => 'Powered by Paragrafy',
-            'powered_by_footer' => 'Powered by Paragrafy'
+            'powered_by_footer' => 'Powered by Paragrafy',
+            'lang_fallback_notice' => 'This document isn\'t available in %s yet — showing the available version instead.'
         ],
         'es' => [
             'toc' => 'Índice de contenidos',
@@ -285,7 +295,8 @@ function get_i18n_strings(string $lang): array {
             'upcoming_banner_text' => 'Nueva versión programada disponible: estas condiciones se actualizarán el %s.',
             'upcoming_banner_link' => 'Ver vista previa &rarr;',
             'powered_by_toc' => 'Desarrollado con Paragrafy',
-            'powered_by_footer' => 'Desarrollado con Paragrafy'
+            'powered_by_footer' => 'Desarrollado con Paragrafy',
+            'lang_fallback_notice' => 'Este documento todavía no está disponible en %s — se muestra la versión disponible.'
         ],
         'fr' => [
             'toc' => 'Table des matières',
@@ -306,7 +317,8 @@ function get_i18n_strings(string $lang): array {
             'upcoming_banner_text' => 'Nouvelle version prévue : ces dispositions seront mises à jour le %s.',
             'upcoming_banner_link' => 'Aperçu anticipé &rarr;',
             'powered_by_toc' => 'Propulsé par Paragrafy',
-            'powered_by_footer' => 'Propulsé par Paragrafy'
+            'powered_by_footer' => 'Propulsé par Paragrafy',
+            'lang_fallback_notice' => 'Ce document n\'est pas encore disponible en %s — voici la version disponible.'
         ],
         'it' => [
             'toc' => 'Indice dei contenuti',
@@ -327,7 +339,8 @@ function get_i18n_strings(string $lang): array {
             'upcoming_banner_text' => 'Nuova versione pianificata disponibile: queste disposizioni saranno aggiornate il %s.',
             'upcoming_banner_link' => 'Anteprima anticipata &rarr;',
             'powered_by_toc' => 'Offerto da Paragrafy',
-            'powered_by_footer' => 'Offerto da Paragrafy'
+            'powered_by_footer' => 'Offerto da Paragrafy',
+            'lang_fallback_notice' => 'Questo documento non è ancora disponibile in %s — ecco la versione disponibile.'
         ],
         'nl' => [
             'toc' => 'Inhoudsopgave',
@@ -348,7 +361,8 @@ function get_i18n_strings(string $lang): array {
             'upcoming_banner_text' => 'Geplande wijziging beschikbaar: deze bepalingen worden bijgewerkt op %s.',
             'upcoming_banner_link' => 'Vooraf bekijken &rarr;',
             'powered_by_toc' => 'Mogelijk gemaakt door Paragrafy',
-            'powered_by_footer' => 'Mogelijk gemaakt door Paragrafy'
+            'powered_by_footer' => 'Mogelijk gemaakt door Paragrafy',
+            'lang_fallback_notice' => 'Dit document is nog niet beschikbaar in %s — hier de beschikbare versie.'
         ]
     ];
     return $dict[$lang] ?? $dict['en'];
@@ -459,6 +473,14 @@ function handle_json_api(array $parts, array $project, PDO $db, string $primaryL
     $stmt->execute([$project['id'], $lang, $slug, $slug]);
     $doc = $stmt->fetch();
 
+    $fallbackFromLang = null;
+    if (!$doc && !$isPreview) {
+        $doc = find_public_translation_with_fallback($db, (int)$project['id'], $lang, $slug, $primaryLang);
+        if ($doc) {
+            $fallbackFromLang = $lang;
+        }
+    }
+
     if (!$doc) {
         http_response_code(404);
         echo json_encode(['error' => 'Document not found or not published']);
@@ -507,6 +529,10 @@ function handle_json_api(array $parts, array $project, PDO $db, string $primaryL
     if ($isPreview) {
         $response['effective_date'] = date('c', strtotime($doc['scheduled_at']));
     }
+    if ($fallbackFromLang !== null) {
+        $response['fallback'] = true;
+        $response['requested_lang'] = $fallbackFromLang;
+    }
     $json = json_encode($response, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
 
     if (!$isPreview && $json !== false) {
@@ -532,7 +558,7 @@ function public_cache_fill_dynamic(string $html): string {
     );
 }
 
-function render_public_document(array $project, array $trans, string $content, array $languages, string $currentLang, bool $isPreview = false, ?string $liveSlug = null): void {
+function render_public_document(array $project, array $trans, string $content, array $languages, string $currentLang, bool $isPreview = false, ?string $liveSlug = null, ?string $fallbackFromLang = null): void {
     $liveSlug = $liveSlug ?? $trans['slug'];
     $brand = htmlspecialchars($project['brand_color'] ?: '#F0A63C');
     $logoUrl = $project['logo_url'] ?: '/paragrafy.svg';
@@ -641,6 +667,10 @@ function render_public_document(array $project, array $trans, string $content, a
                         <span><?= sprintf($i18n['upcoming_banner_text'], '<strong style="color:#fff">' . date('d.m.Y', strtotime($trans['scheduled_at'])) . '</strong>') ?></span>
                         <a href="/<?= htmlspecialchars($currentLang) ?>/<?= htmlspecialchars($trans['slug']) ?>/preview" class="btn-preview"><?= $i18n['upcoming_banner_link'] ?></a>
                     </div>
+                <?php elseif ($fallbackFromLang !== null): ?>
+                    <div class="preview-banner">
+                        <span><?= sprintf($i18n['lang_fallback_notice'], strtoupper(htmlspecialchars($fallbackFromLang))) ?></span>
+                    </div>
                 <?php endif; ?>
 
                 <h1><?= htmlspecialchars($trans['title']) ?></h1>
@@ -748,20 +778,44 @@ function render_public_document(array $project, array $trans, string $content, a
     <?php
 }
 
-function render_public_overview(array $project, PDO $db, string $lang): void {
+function render_public_overview(array $project, PDO $db, string $lang, string $primaryLang): void {
     $brand = htmlspecialchars($project['brand_color'] ?: '#F0A63C');
     $logoUrl = $project['logo_url'] ?: '/paragrafy.svg';
     $i18n = get_i18n_strings($lang);
 
+    // Dokumente + alle veroeffentlichten Uebersetzungen getrennt laden (statt eines
+    // LEFT JOINs nur fuer $lang), damit pro Dokument per pick_fallback_translation() auf
+    // eine andere Sprache ausgewichen werden kann, statt es bei fehlender $lang-Version
+    // stillschweigend aus der Uebersicht zu verstecken.
+    $stmt = $db->prepare("SELECT d.id, dt.slug as default_slug, dt.title as fallback_title FROM documents d JOIN doc_types dt ON d.doc_type_id = dt.id WHERE d.project_id = ?");
+    $stmt->execute([$project['id']]);
+    $documents = $stmt->fetchAll();
+
     $stmt = $db->prepare("
-        SELECT t.title, t.slug, dt.slug as default_slug, dt.title as fallback_title
-        FROM documents d
-        JOIN doc_types dt ON d.doc_type_id = dt.id
-        LEFT JOIN translations t ON d.id = t.document_id AND t.lang = ? AND t.status = 'published'
-        WHERE d.project_id = ?
+        SELECT t.document_id, t.lang, t.title, t.slug
+        FROM translations t
+        JOIN documents d ON t.document_id = d.id
+        WHERE d.project_id = ? AND t.status = 'published'
     ");
-    $stmt->execute([$lang, $project['id']]);
-    $docs = $stmt->fetchAll();
+    $stmt->execute([$project['id']]);
+    $translationsByDoc = [];
+    foreach ($stmt->fetchAll() as $t) {
+        $translationsByDoc[$t['document_id']][] = $t;
+    }
+
+    $docs = [];
+    foreach ($documents as $document) {
+        $candidates = $translationsByDoc[$document['id']] ?? [];
+        $best = pick_fallback_translation($candidates, $lang, $primaryLang);
+        $docs[] = [
+            'title' => $best['title'] ?? null,
+            'slug' => $best['slug'] ?? null,
+            'default_slug' => $document['default_slug'],
+            'fallback_title' => $document['fallback_title'],
+            'is_fallback' => $best !== null && $best['lang'] !== $lang,
+            'fallback_lang' => $best['lang'] ?? null,
+        ];
+    }
     ?>
     <!DOCTYPE html>
     <html lang="<?= htmlspecialchars($lang) ?>">
@@ -798,7 +852,7 @@ function render_public_overview(array $project, PDO $db, string $lang): void {
                     <?php if ($doc['title']): ?>
                         <li>
                             <a href="/<?= htmlspecialchars($lang) ?>/<?= htmlspecialchars($doc['slug'] ?: $doc['default_slug']) ?>">
-                                <span><?= htmlspecialchars($doc['title']) ?></span>
+                                <span><?= htmlspecialchars($doc['title']) ?><?php if ($doc['is_fallback']): ?> <span style="font-size:10px;font-weight:700;color:var(--text-faint);border:1px solid var(--border);border-radius:4px;padding:1px 5px;vertical-align:middle;"><?= htmlspecialchars(strtoupper($doc['fallback_lang'])) ?></span><?php endif; ?></span>
                                 <span>&rarr;</span>
                             </a>
                         </li>

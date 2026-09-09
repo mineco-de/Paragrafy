@@ -6,7 +6,7 @@ declare(strict_types=1);
 
 // CalVer: JAHR.MONAT.BUILD - BUILD zaehlt Releases innerhalb des Monats hoch (startet bei 1).
 // Siehe CHANGELOG.md fuer die Aenderungen je Version.
-define('PARAGRAFY_VERSION', '2026.9.13');
+define('PARAGRAFY_VERSION', '2026.9.14');
 define('PARAGRAFY_DIR', __DIR__);
 // Where persistent data (DB, config, backups, .env) lives. Defaults to the
 // code directory (bare-metal installs); set PARAGRAFY_DATA_DIR to point this
@@ -795,6 +795,58 @@ function sanitize_html_node(DOMNode $node, array $allowedTags, array $dropEntire
 
         sanitize_html_node($child, $allowedTags, $dropEntirely);
     }
+}
+
+/**
+ * Waehlt aus einer Liste veroeffentlichter Uebersetzungen desselben Dokuments die beste
+ * Sprache: zuerst $preferredLang, dann Englisch, dann die Projekt-primary_lang, sonst die
+ * erste vorhandene (deckt den Fall "nur eine Sprache existiert" automatisch ab).
+ * $primaryLang ist dabei kein verlaesslicher Garant fuer Existenz (frei editierbares Feld),
+ * daher nur als Versuch in der Kette, nicht als sicherer Treffer.
+ */
+function pick_fallback_translation(array $candidates, string $preferredLang, string $primaryLang): ?array {
+    if (empty($candidates)) {
+        return null;
+    }
+    foreach ([$preferredLang, 'en', $primaryLang] as $lang) {
+        foreach ($candidates as $c) {
+            if ($c['lang'] === $lang) {
+                return $c;
+            }
+        }
+    }
+    return $candidates[0];
+}
+
+/**
+ * Findet eine oeffentlich auslieferbare Uebersetzung fuer $slug, wenn die exakt angefragte
+ * $lang keine veroeffentlichte Version hat. Das Dokument wird ueber JEDE Sprache anhand des
+ * Slugs identifiziert (t.slug ODER dt.slug, wie die Direkt-Query in index.php) -- dt.slug ist
+ * doc-type-weit identisch, daher unabhaengig davon, welche Sprache letztlich passt.
+ */
+function find_public_translation_with_fallback(PDO $db, int $projectId, string $lang, string $slug, string $primaryLang): ?array {
+    $stmt = $db->prepare("
+        SELECT d.id FROM translations t
+        JOIN documents d ON t.document_id = d.id
+        JOIN doc_types dt ON d.doc_type_id = dt.id
+        WHERE d.project_id = ? AND (t.slug = ? OR dt.slug = ?) AND t.status = 'published'
+        LIMIT 1
+    ");
+    $stmt->execute([$projectId, $slug, $slug]);
+    $doc = $stmt->fetch();
+    if (!$doc) {
+        return null;
+    }
+
+    $stmt = $db->prepare("
+        SELECT t.*, d.doc_type_id, dt.title AS default_title, dt.slug AS default_slug
+        FROM translations t
+        JOIN documents d ON t.document_id = d.id
+        JOIN doc_types dt ON d.doc_type_id = dt.id
+        WHERE t.document_id = ? AND t.status = 'published'
+    ");
+    $stmt->execute([$doc['id']]);
+    return pick_fallback_translation($stmt->fetchAll(), $lang, $primaryLang);
 }
 
 function replace_placeholders(string $content, array $project): string {

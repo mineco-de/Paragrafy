@@ -8,6 +8,25 @@ Die Versionsnummer folgt **CalVer** (`JAHR.MONAT.BUILD`) statt SemVer:
 jeden Monat wieder bei `1`. Änderungen vor `2026.9.1` sind nicht rückwirkend
 erfasst — siehe dafür die Git-Historie.
 
+## [2026.9.14] - 2026-09-09
+
+### Added
+Mehrsprachige Fallbacks für die öffentliche Rechtstexte-Auslieferung: Fehlt eine Übersetzung in
+der angefragten Sprache, wird automatisch eine sinnvolle Alternative ausgeliefert statt eines
+404-Fehlers.
+
+- **Fallback-Kette**: angefragte Sprache → Englisch → Projekt-Standardsprache (`primary_lang`) →
+  die einzige vorhandene Sprache. Gilt für den Public Viewer (`/{lang}/{slug}`), die JSON-API
+  (`/api/{lang}/{slug}`) und die Übersichtsseite (`/{lang}`).
+- **Transparente Kennzeichnung**: Der Public Viewer zeigt einen Hinweis-Banner mit der
+  ausgelieferten statt der angefragten Sprache; die Übersichtsseite markiert Einträge mit einem
+  kleinen Sprach-Badge; die JSON-API liefert zusätzlich `fallback: true` und `requested_lang`.
+- **Bewusst ausgenommen**: Vorschau-URLs (`/…/preview`) bleiben strikt auf die exakt angefragte
+  Sprache beschränkt (kein Fallback-Sinn bei gezielt vorbereiteten Änderungen).
+- Nutzt dieselbe HTTP-Validierungscaching-Infrastruktur wie zuvor — jede angefragte Sprache
+  erhält weiterhin einen eigenen ETag/Cache-Eintrag, da der Hinweis-Banner vom angefragten
+  Sprachcode abhängt.
+
 ## [2026.9.13] - 2026-09-09
 
 ### Added
