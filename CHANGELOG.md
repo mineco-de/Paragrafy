@@ -8,6 +8,43 @@ Die Versionsnummer folgt **CalVer** (`JAHR.MONAT.BUILD`) statt SemVer:
 jeden Monat wieder bei `1`. Änderungen vor `2026.9.1` sind nicht rückwirkend
 erfasst — siehe dafür die Git-Historie.
 
+## [2026.9.16] - 2026-09-10
+
+### Security
+TOTP-Bypass bei Passwort-Reset und SSRF via Redirect-Ziel beim URL-Import behoben (beide beim
+Full-Repo-Review durch Greptile gefunden):
+
+- **Passwort-Reset umging TOTP**: `handle_reset_password()` erstellte für TOTP-aktivierte User
+  nach einem gültigen Reset-Token direkt eine authentifizierte Session, ohne den zweiten Faktor
+  abzufragen — ein abgefangener Reset-Token allein reichte damit aus, um TOTP komplett zu
+  umgehen. Der Reset-Handler stellt jetzt denselben `totp_pending`-Zustand her wie der normale
+  Login, bevor eine Session finalisiert wird.
+- **SSRF via Redirect beim KI-Einlesemodus (BETA)**: `fetch_raw_legal_text()` prüfte die
+  eingegebene URL per `is_public_http_url()` gegen private/loopback/link-lokale Adressen, ließ
+  `CURLOPT_FOLLOWLOCATION` aber bis zu drei Redirects blind verfolgen, ohne das jeweilige Ziel
+  erneut zu validieren. Eine öffentliche URL, die per 3xx-Redirect auf eine interne Adresse
+  umleitet, wurde anstandslos abgerufen. Redirects werden jetzt manuell verfolgt und jedes Ziel
+  — inklusive relativer sowie query-/fragment-only `Location`-Header, nach RFC 3986 §5.3
+  aufgelöst — erneut geprüft, bevor der nächste Request gestellt wird.
+
+## [2026.9.15] - 2026-09-10
+
+### Fixed
+Speichern eines Tabs auf der Projekt-Einstellungsseite konnte Felder anderer, gerade erst
+gespeicherter Tabs unbemerkt zurücksetzen:
+
+- Alle sechs Formulare (Allgemein, Cookie-Banner, Consent-Log, E-Mail/SMTP, Webhook/API-Keys,
+  Firma) teilten sich bisher einen gemeinsamen `save_project`-Handler mit einem UPDATE über
+  sämtliche Spalten. Dafür musste jedes Formular alle Projekt-Felder (u. a. `brand_color`) als
+  beim Seiten-Rendern eingefrorene Hidden-Inputs mitschicken. Speicherte man z. B. die
+  Markenfarbe im Allgemein-Tab und danach — ohne Reload — einen anderen Tab, überschrieb dessen
+  eingefrorener Hidden-Wert die gerade gespeicherte Änderung wieder mit dem alten Stand vom
+  Seitenaufbau.
+- Jeder Tab hat jetzt einen eigenen `action`-Wert (`save_general`, `save_cookie_banner`,
+  `save_consent_log`, `save_email`, `save_webhook`, `save_company`) mit einem eigenen, schlanken
+  UPDATE nur auf den tatsächlich zugehörigen Spalten — die Hidden-Freeze-Felder für fremde Tabs
+  entfallen dadurch komplett.
+
 ## [2026.9.14] - 2026-09-09
 
 ### Added
