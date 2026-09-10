@@ -261,9 +261,10 @@ function ensure_schema_migrations(PDO $pdo): void {
                     $pdo->exec("ALTER TABLE projects ADD COLUMN " . $c . " " . $type);
                 }
             }
-            if (!in_array('settings_updated_at', $colNames)) {
-                $pdo->exec("UPDATE projects SET settings_updated_at = CURRENT_TIMESTAMP WHERE settings_updated_at = '1970-01-01 00:00:00'");
-            }
+            // Unbedingt (nicht nur direkt nach dem ADD COLUMN) ausfuehren: bricht ein Lauf
+            // zwischen ALTER TABLE und diesem UPDATE ab, erkennt der naechste Aufruf die Spalte
+            // bereits als vorhanden und wuerde den Backfill sonst fuer immer ueberspringen.
+            $pdo->exec("UPDATE projects SET settings_updated_at = CURRENT_TIMESTAMP WHERE settings_updated_at = '1970-01-01 00:00:00'");
         }
 
         $stmtUsers = $pdo->query("SELECT name FROM sqlite_master WHERE type='table' AND name='users'");
