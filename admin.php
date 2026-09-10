@@ -1069,7 +1069,13 @@ function finalize_user_session(array $user): void {
     $_SESSION['paragrafy_user_id'] = (int)$user['id'];
     $_SESSION['paragrafy_user_name'] = $user['name'];
     $_SESSION['paragrafy_user_email'] = $user['email'];
-    $_SESSION['paragrafy_user_locale'] = $user['locale'] ?? 'de';
+    // Eine Sprache, die man gerade erst auf dem Login-Bildschirm gewaehlt hat (Cookie,
+    // gesetzt bevor die Session existierte), soll den Login ueberleben statt sofort von der
+    // gespeicherten Account-Praeferenz ueberschrieben zu werden -- current_locale() gibt der
+    // Session-Praeferenz sonst immer Vorrang vor dem Cookie.
+    $known = array_keys(ui_locales());
+    $justChosen = (string)($_COOKIE['paragrafy_locale'] ?? '');
+    $_SESSION['paragrafy_user_locale'] = in_array($justChosen, $known, true) ? $justChosen : ($user['locale'] ?? 'de');
 }
 
 function finalize_admin_session(): void {

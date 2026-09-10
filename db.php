@@ -1856,9 +1856,16 @@ function render_locale_switch(bool $floating = false): string {
     ob_start();
     if ($floating) { ?><div class="pg-locale-switch-floating"><?php }
     ?>
+    <?php
+    // 'msg' ist ein einmaliger Flash-Banner-Parameter (z.B. ?msg=saved) -- beim Sprachwechsel
+    // mitkopiert, wuerde er den letzten Erfolgs-/Fehler-Hinweis erneut anzeigen, obwohl gerade
+    // gar keine Aktion stattgefunden hat.
+    $baseQuery = $_GET;
+    unset($baseQuery['msg']);
+    ?>
     <div class="pg-locale-switch">
         <?php foreach (ui_locales() as $code => $meta): ?>
-            <?php $query = $_GET; $query['locale'] = $code; ?>
+            <?php $query = $baseQuery; $query['locale'] = $code; ?>
             <a href="<?= htmlspecialchars($path . '?' . http_build_query($query)) ?>" class="<?= $code === $curLocale ? 'active' : '' ?>" title="<?= htmlspecialchars($meta['label'] ?? strtoupper($code)) ?>"><?= htmlspecialchars(strtoupper($code)) ?></a>
         <?php endforeach; ?>
     </div>
