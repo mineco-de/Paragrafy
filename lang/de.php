@@ -96,6 +96,7 @@ return [
     'admin.common.sidebar.back_to_portal' => '&larr; Zurück zum Kundenportal',
     'admin.common.sidebar.view_public_site' => 'Öffentliche Seite ansehen',
     'admin.common.sidebar.logout_title' => 'Abmelden',
+    'admin.common.demo_banner.text' => 'Demo-Reset in :time &ndash; nichts hier wird dauerhaft gespeichert.',
 
     // ---------------------------------------------------------------
     // editor.php - Document editor UI

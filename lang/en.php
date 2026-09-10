@@ -82,6 +82,7 @@ return [
     'admin.common.sidebar.back_to_portal' => '&larr; Back to customer portal',
     'admin.common.sidebar.view_public_site' => 'View public site',
     'admin.common.sidebar.logout_title' => 'Log out',
+    'admin.common.demo_banner.text' => 'Demo resets in :time &mdash; nothing you do here is saved.',
 
     // ---------------------------------------------------------------
     // editor.php - Document editor UI
