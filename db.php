@@ -1085,7 +1085,11 @@ function resolve_redirect_url(string $baseUrl, string $location): ?string {
     if ($location === '') {
         return null;
     }
-    if (parse_url($location, PHP_URL_SCHEME) !== null) {
+    $locParts = parse_url($location);
+    if ($locParts === false) {
+        return null;
+    }
+    if (!empty($locParts['scheme'])) {
         return $location;
     }
     $base = parse_url($baseUrl);
@@ -1093,16 +1097,29 @@ function resolve_redirect_url(string $baseUrl, string $location): ?string {
         return null;
     }
     $scheme = $base['scheme'] ?? 'https';
-    $host = $base['host'] . (isset($base['port']) ? ':' . $base['port'] : '');
     if (str_starts_with($location, '//')) {
         return $scheme . ':' . $location;
     }
-    if (str_starts_with($location, '/')) {
-        return $scheme . '://' . $host . $location;
+    $host = $base['host'] . (isset($base['port']) ? ':' . $base['port'] : '');
+
+    $locPath = $locParts['path'] ?? '';
+    if ($locPath === '') {
+        // Query-only ("?x=1") oder Fragment-only ("#abc") Redirect: der Pfad der
+        // zuletzt angefragten URL bleibt unveraendert, nur Query/Fragment aendern sich.
+        $path = $base['path'] ?? '/';
+    } elseif (str_starts_with($locPath, '/')) {
+        $path = $locPath;
+    } else {
+        $basePath = $base['path'] ?? '/';
+        $dir = str_ends_with($basePath, '/') ? $basePath : (dirname($basePath) . '/');
+        $path = $dir . $locPath;
     }
-    $basePath = $base['path'] ?? '/';
-    $dir = str_ends_with($basePath, '/') ? $basePath : (dirname($basePath) . '/');
-    return $scheme . '://' . $host . $dir . $location;
+
+    $result = $scheme . '://' . $host . $path;
+    if (isset($locParts['query'])) {
+        $result .= '?' . $locParts['query'];
+    }
+    return $result;
 }
 
 /**
