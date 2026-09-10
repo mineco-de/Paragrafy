@@ -247,7 +247,13 @@ function ensure_schema_migrations(PDO $pdo): void {
                 'consent_log_retention_days' => "INTEGER DEFAULT 1095",
                 'ai_provider' => "TEXT DEFAULT ''",
                 'ai_api_key' => "TEXT DEFAULT ''",
-                'settings_updated_at' => "DATETIME DEFAULT CURRENT_TIMESTAMP",
+                // SQLite lehnt bei ALTER TABLE ... ADD COLUMN einen nicht-konstanten Default
+                // (CURRENT_TIMESTAMP) auf Tabellen mit UNIQUE-Constraint bzw. eingehenden
+                // Foreign-Key-Referenzen ab ("Cannot add a column with non-constant default")
+                // -- genau das ist projects (UNIQUE(domain), von documents/... referenziert).
+                // Deshalb hier ein konstanter Platzhalter-Default, Backfill per UPDATE direkt
+                // im Anschluss (UPDATE darf CURRENT_TIMESTAMP sehr wohl verwenden).
+                'settings_updated_at' => "DATETIME DEFAULT '1970-01-01 00:00:00'",
                 'settings_version' => "INTEGER NOT NULL DEFAULT 1"
             ];
             foreach ($newCols as $c => $type) {
@@ -255,6 +261,10 @@ function ensure_schema_migrations(PDO $pdo): void {
                     $pdo->exec("ALTER TABLE projects ADD COLUMN " . $c . " " . $type);
                 }
             }
+            // Unbedingt (nicht nur direkt nach dem ADD COLUMN) ausfuehren: bricht ein Lauf
+            // zwischen ALTER TABLE und diesem UPDATE ab, erkennt der naechste Aufruf die Spalte
+            // bereits als vorhanden und wuerde den Backfill sonst fuer immer ueberspringen.
+            $pdo->exec("UPDATE projects SET settings_updated_at = CURRENT_TIMESTAMP WHERE settings_updated_at = '1970-01-01 00:00:00'");
         }
 
         $stmtUsers = $pdo->query("SELECT name FROM sqlite_master WHERE type='table' AND name='users'");
