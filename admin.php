@@ -67,7 +67,12 @@ if (isset($_POST['action']) && $_POST['action'] === 'login') {
             $user = $stmt->fetch();
             if ($user && !empty($user['password_hash']) && password_verify($pass, $user['password_hash'])) {
                 if (!empty($user['totp_enabled_at'])) {
-                    $totpPending = ['type' => 'user', 'user_id' => (int)$user['id'], 'started_at' => time()];
+                    // Eine auf diesem Seitenaufruf gewaehlte Sprache muss ueber den TOTP-Zwischenschritt
+                    // hinweg mitgegeben werden -- der Redirect nach /admin (unten) traegt kein ?locale=
+                    // mehr, und beim Abschluss in handle_totp_verify() waere $_GET['locale'] dann leer.
+                    $pendingLocaleKnown = array_keys(ui_locales());
+                    $pendingLocale = in_array($_GET['locale'] ?? '', $pendingLocaleKnown, true) ? $_GET['locale'] : null;
+                    $totpPending = ['type' => 'user', 'user_id' => (int)$user['id'], 'started_at' => time(), 'locale' => $pendingLocale];
                 } else {
                     finalize_user_session($user);
                     $loggedIn = true;
@@ -1063,7 +1068,7 @@ function handle_sso_login(array $config): void {
     exit;
 }
 
-function finalize_user_session(array $user): void {
+function finalize_user_session(array $user, ?string $explicitLocale = null): void {
     session_regenerate_id(true);
     $_SESSION['paragrafy_admin'] = true;
     $_SESSION['paragrafy_user_id'] = (int)$user['id'];
@@ -1071,14 +1076,15 @@ function finalize_user_session(array $user): void {
     $_SESSION['paragrafy_user_email'] = $user['email'];
     // Eine Sprache, die man gerade erst auf dem Login-Bildschirm gewaehlt hat, soll den Login
     // ueberleben statt sofort von der gespeicherten Account-Praeferenz ueberschrieben zu werden --
-    // current_locale() gibt der Session-Praeferenz sonst immer Vorrang. Bewusst ?locale= aus DIESEM
-    // Request statt des paragrafy_locale-Cookies: das Cookie lebt 30 Tage und wuerde sonst auch
-    // Monate spaeter noch jede frisch in den Einstellungen gespeicherte Account-Praeferenz beim
-    // naechsten Login stillschweigend zurueckdrehen. Das Login-Formular hat kein eigenes
-    // action-Attribut, uebernimmt also die Query-String der Login-Seite (inkl. ?locale=) 1:1 in
-    // den POST -- ein Klick auf den Umschalter auf DIESEM Seitenaufruf reicht damit bis hierher.
+    // current_locale() gibt der Session-Praeferenz sonst immer Vorrang. Bewusst $_GET['locale'] aus
+    // DIESEM Request (als Default, falls $explicitLocale nicht mitgegeben wird) statt des
+    // paragrafy_locale-Cookies: das Cookie lebt 30 Tage und wuerde sonst auch Monate spaeter noch
+    // jede frisch in den Einstellungen gespeicherte Account-Praeferenz beim naechsten Login
+    // stillschweigend zurueckdrehen. $explicitLocale existiert fuer den TOTP-Zwischenschritt: dort
+    // greift der finale POST erst nach dem Redirect zur TOTP-Seite, der kein ?locale= mehr traegt,
+    // daher wird die Wahl dort ueber $_SESSION['totp_pending']['locale'] durchgereicht.
     $known = array_keys(ui_locales());
-    $justChosen = (string)($_GET['locale'] ?? '');
+    $justChosen = $explicitLocale ?? (string)($_GET['locale'] ?? '');
     $_SESSION['paragrafy_user_locale'] = in_array($justChosen, $known, true) ? $justChosen : ($user['locale'] ?? 'de');
 }
 
@@ -1124,7 +1130,7 @@ function handle_totp_verify(PDO $db): ?string {
         $stmt->execute([(int)($pending['user_id'] ?? 0)]);
         $user = $stmt->fetch();
         if ($user) {
-            $success = totp_finish_user_login($db, $user, $input);
+            $success = totp_finish_user_login($db, $user, $input, $pending['locale'] ?? null);
         }
     } elseif ($type === 'admin' && admin_totp_available()) {
         $success = totp_finish_admin_login($input);
@@ -1143,9 +1149,9 @@ function handle_totp_verify(PDO $db): ?string {
     return t('admin.login.totp_invalid');
 }
 
-function totp_finish_user_login(PDO $db, array $user, string $input): bool {
+function totp_finish_user_login(PDO $db, array $user, string $input, ?string $pendingLocale = null): bool {
     if (totp_consume_for_user_login($db, $user, $input)) {
-        finalize_user_session($user);
+        finalize_user_session($user, $pendingLocale);
         return true;
     }
     return false;
