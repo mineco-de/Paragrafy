@@ -1841,6 +1841,33 @@ function ui_locales(): array {
 }
 
 /**
+ * Kleiner DE/EN-Sprachumschalter fuer Sidebar und Login-Bildschirme. Zeigt
+ * bewusst den Sprachcode als Text statt der Flaggen-Emoji aus ui_locales() --
+ * Regional-Indicator-Flaggen werden auf vielen Systemen (u.a. Windows ohne
+ * aktuelle Emoji-Schriftart) nur als Laendercode-Buchstaben gerendert, was bei
+ * "en" als "GB" statt "EN" erscheint und die Sprachwahl eher verwirrt als
+ * hilft. Der Link haengt ?locale= an die aktuelle URL (Pfad + bestehende
+ * Query-Parameter) an, damit ein Sprachwechsel nicht von der aktuellen Seite
+ * wegspringt.
+ */
+function render_locale_switch(bool $floating = false): string {
+    $curLocale = current_locale();
+    $path = parse_url($_SERVER['REQUEST_URI'] ?? '/admin', PHP_URL_PATH) ?: '/admin';
+    ob_start();
+    if ($floating) { ?><div class="pg-locale-switch-floating"><?php }
+    ?>
+    <div class="pg-locale-switch">
+        <?php foreach (ui_locales() as $code => $meta): ?>
+            <?php $query = $_GET; $query['locale'] = $code; ?>
+            <a href="<?= htmlspecialchars($path . '?' . http_build_query($query)) ?>" class="<?= $code === $curLocale ? 'active' : '' ?>" title="<?= htmlspecialchars($meta['label'] ?? strtoupper($code)) ?>"><?= htmlspecialchars(strtoupper($code)) ?></a>
+        <?php endforeach; ?>
+    </div>
+    <?php
+    if ($floating) { ?></div><?php }
+    return ob_get_clean();
+}
+
+/**
  * Resolves the UI language for the current request: explicit ?locale= (public
  * pages, also persisted to a cookie) or the logged-in user's saved
  * preference, falling back to the browser's Accept-Language header, then 'de'.
@@ -2886,6 +2913,12 @@ function theme_base_css_admin(string $accent = '#F0A63C', bool $enableDarkMode =
         .pg-user-name { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .pg-logout { color: var(--text-faint); font-size: 12px; }
 
+        .pg-locale-switch { display: flex; gap: 4px; }
+        .pg-locale-switch a { padding: 5px 10px; border-radius: var(--radius-sm); font-size: 11.5px; font-weight: 700; letter-spacing: .03em; font-family: 'JetBrains Mono', monospace; color: var(--text-muted); text-decoration: none; border: 1px solid var(--border); }
+        .pg-locale-switch a:hover { color: var(--text); background: var(--bg); opacity: 1; }
+        .pg-locale-switch a.active { color: var(--accent); background: var(--accent-bg); border-color: var(--accent); }
+        .pg-locale-switch-floating { position: fixed; top: 16px; right: 16px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 4px; z-index: 20; }
+
         .pg-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
         .pg-content { padding: 32px 32px 80px; }
         .pg-footer-note { padding: 14px 32px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-faintest); line-height: 1.5; }
@@ -3074,11 +3107,8 @@ function render_sidebar(string $active, array $project, array $projects): string
             </span>
         </a>
 
-        <div style="display:flex;gap:6px;padding:0 2px 8px;font-size:11px">
-            <?php $curLocale = current_locale(); ?>
-            <?php foreach (ui_locales() as $localeCode => $localeMeta): ?>
-                <a href="/admin/settings?project_id=<?= $project['id'] ?>&locale=<?= htmlspecialchars($localeCode) ?>" style="text-decoration:none;color:var(--text-faint);<?= $localeCode === $curLocale ? 'font-weight:700;color:var(--text)' : '' ?>" title="<?= htmlspecialchars($localeMeta['label'] ?? strtoupper($localeCode)) ?>"><?= htmlspecialchars($localeMeta['flag'] ?? strtoupper($localeCode)) ?></a>
-            <?php endforeach; ?>
+        <div style="padding:0 2px 10px">
+            <?= render_locale_switch() ?>
         </div>
 
         <div class="pg-user-row">

@@ -1331,6 +1331,7 @@ function render_login_view(?string $error): void {
         </style>
     </head>
     <body>
+        <?= render_locale_switch(true) ?>
         <?php $demoBanner = render_demo_countdown_banner(); ?>
         <?php if ($demoBanner !== ''): ?>
             <div style="width:340px;box-sizing:border-box;"><?= $demoBanner ?></div>
