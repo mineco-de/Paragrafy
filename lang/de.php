@@ -548,6 +548,8 @@ return [
 
     'admin.settings.automation.cloud_heading' => 'Automatisierung',
     'admin.settings.automation.cloud_subtitle' => 'Geplante Veröffentlichungen, Backups und Prüfberichte laufen bei Managed Cloud automatisch im Hintergrund — keine Einrichtung nötig.',
+    'admin.settings.automation.demo_heading' => 'Automatisierung',
+    'admin.settings.automation.demo_subtitle' => 'In der Demo fest vorkonfiguriert und beim nächsten Reset wieder auf den Ausgangszustand gesetzt — hier nicht änderbar.',
     'admin.settings.automation.cron_heading' => 'Automatisierung (Cron)',
     'admin.settings.automation.cron_subtitle' => 'Diese Adressen extern per Cron-Job (oder Uptime-Monitor) aufrufen, damit geplante Veröffentlichungen live gehen, Webhooks zugestellt und Backups angelegt werden. Alle vier sind mit einem geheimen Schlüssel geschützt — ohne korrektes <code style="background:var(--border-soft);padding:1px 5px;border-radius:4px">?secret=</code> antworten sie mit 403.',
     'admin.settings.automation.secret_regenerated' => 'Neues Secret erzeugt — bitte die Cron-Jobs mit den Adressen unten aktualisieren.',
@@ -569,6 +571,7 @@ return [
     'admin.settings.project.name_label' => 'Projekt-Name',
     'admin.settings.project.domain_label' => 'Domain / Subdomain',
     'admin.settings.project.domain_managed_hint' => 'Wird über dein Managed-Cloud-Kundenportal verwaltet, hier nicht änderbar.',
+    'admin.settings.project.domain_demo_hint' => 'In der Demo fest hinterlegt, hier nicht änderbar.',
     'admin.settings.project.primary_lang_label' => 'Primärsprache',
     'admin.settings.project.active_langs_label' => 'Aktive Sprachen (kommagetrennt, z. B. de,en,es)',
     'admin.settings.project.brand_color_label' => 'Akzentfarbe',

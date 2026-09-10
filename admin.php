@@ -271,6 +271,10 @@ if (isset($_POST['action']) && $_POST['action'] === 'run_webhook_queue_now') {
 
 // 1e. Cron-Secret neu generieren (macht bestehende Cron-URLs ungültig)
 if (isset($_POST['action']) && $_POST['action'] === 'regenerate_cron_secret') {
+    if (!empty(get_config()['managed_cloud']) || !empty(get_config()['is_demo'])) {
+        header('Location: /admin/settings?project_id=' . $projectId . '&msg=managed_cloud_blocked');
+        exit;
+    }
     regenerate_cron_secret();
     log_audit(null, '', t('admin.common.audit.cron_secret_regenerated'));
     header("Location: /admin/settings?project_id=$projectId&msg=cron_secret_regenerated");
@@ -519,8 +523,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $brandColor = '#' . $brandColor;
         }
 
-        $isManagedCloud = !empty(get_config()['managed_cloud']);
-        $domainToSave = $isManagedCloud ? $project['domain'] : $_POST['domain'];
+        $isLockedInstance = !empty(get_config()['managed_cloud']) || !empty(get_config()['is_demo']);
+        $domainToSave = $isLockedInstance ? $project['domain'] : $_POST['domain'];
 
         // settings_updated_at wird bewusst nicht per CURRENT_TIMESTAMP gesetzt, sondern strikt
         // hochgezaehlt (+1s statt Gleichstand), damit Last-Modified/If-Modified-Since bei zwei
@@ -1816,6 +1820,8 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
     $cronBase = $cronScheme . '://' . $cronHost;
     $queueSummary = webhook_queue_summary($db, $project['id']);
     $isManagedCloud = !empty(get_config()['managed_cloud']);
+    $isDemo = !empty(get_config()['is_demo']);
+    $isLockedInstance = $isManagedCloud || $isDemo;
     ?>
     <!DOCTYPE html>
     <html lang="<?= htmlspecialchars(current_locale()) ?>">
@@ -1893,6 +1899,9 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                         <?php if ($isManagedCloud): ?>
                             <h2><?= htmlspecialchars(t('admin.settings.automation.cloud_heading')) ?></h2>
                             <p class="pg-card-sub"><?= htmlspecialchars(t('admin.settings.automation.cloud_subtitle')) ?></p>
+                        <?php elseif ($isDemo): ?>
+                            <h2><?= htmlspecialchars(t('admin.settings.automation.demo_heading')) ?></h2>
+                            <p class="pg-card-sub"><?= htmlspecialchars(t('admin.settings.automation.demo_subtitle')) ?></p>
                         <?php else: ?>
                             <h2><?= htmlspecialchars(t('admin.settings.automation.cron_heading')) ?></h2>
                             <p class="pg-card-sub" style="margin-bottom:16px"><?= t('admin.settings.automation.cron_subtitle') ?></p>
@@ -1944,9 +1953,9 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                                 </div>
                                 <div>
                                     <label class="pg-label" style="margin-top:0"><?= htmlspecialchars(t('admin.settings.project.domain_label')) ?></label>
-                                    <?php if ($isManagedCloud): ?>
+                                    <?php if ($isLockedInstance): ?>
                                         <input type="text" value="<?= htmlspecialchars($project['domain']) ?>" disabled style="width:100%;opacity:.6;cursor:not-allowed">
-                                        <p class="pg-card-sub" style="margin-top:6px"><?= htmlspecialchars(t('admin.settings.project.domain_managed_hint')) ?></p>
+                                        <p class="pg-card-sub" style="margin-top:6px"><?= htmlspecialchars(t($isManagedCloud ? 'admin.settings.project.domain_managed_hint' : 'admin.settings.project.domain_demo_hint')) ?></p>
                                     <?php else: ?>
                                         <input type="text" name="domain" value="<?= htmlspecialchars($project['domain']) ?>" required style="width:100%">
                                     <?php endif; ?>
