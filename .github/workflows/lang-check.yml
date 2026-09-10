@@ -1,0 +1,21 @@
+name: Language check
+
+on:
+  pull_request:
+    paths:
+      - 'lang/**'
+
+jobs:
+  check-translations:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+
+      - name: Check translation key completeness
+        run: php bin/check-translations.php
