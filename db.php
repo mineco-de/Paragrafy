@@ -1104,20 +1104,25 @@ function resolve_redirect_url(string $baseUrl, string $location): ?string {
 
     $locPath = $locParts['path'] ?? '';
     if ($locPath === '') {
-        // Query-only ("?x=1") oder Fragment-only ("#abc") Redirect: der Pfad der
-        // zuletzt angefragten URL bleibt unveraendert, nur Query/Fragment aendern sich.
+        // Query-only ("?x=1") oder Fragment-only ("#abc") Redirect: der Pfad der zuletzt
+        // angefragten URL bleibt unveraendert. Fehlt dem Location-Wert selbst eine Query
+        // (reines Fragment), gilt weiterhin die Query der Basis-URL -- sonst wuerde ein
+        // Fragment-only-Redirect die bisherige Query stillschweigend verwerfen (RFC 3986 5.3).
         $path = $base['path'] ?? '/';
+        $query = $locParts['query'] ?? ($base['query'] ?? null);
     } elseif (str_starts_with($locPath, '/')) {
         $path = $locPath;
+        $query = $locParts['query'] ?? null;
     } else {
         $basePath = $base['path'] ?? '/';
         $dir = str_ends_with($basePath, '/') ? $basePath : (dirname($basePath) . '/');
         $path = $dir . $locPath;
+        $query = $locParts['query'] ?? null;
     }
 
     $result = $scheme . '://' . $host . $path;
-    if (isset($locParts['query'])) {
-        $result .= '?' . $locParts['query'];
+    if ($query !== null) {
+        $result .= '?' . $query;
     }
     return $result;
 }
