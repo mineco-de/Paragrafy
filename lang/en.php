@@ -82,6 +82,7 @@ return [
     'admin.common.sidebar.back_to_portal' => '&larr; Back to customer portal',
     'admin.common.sidebar.view_public_site' => 'View public site',
     'admin.common.sidebar.logout_title' => 'Log out',
+    'admin.common.demo_banner.text' => 'Demo resets in :time &mdash; nothing you do here is saved.',
 
     // ---------------------------------------------------------------
     // editor.php - Document editor UI
@@ -522,6 +523,8 @@ return [
 
     'admin.settings.automation.cloud_heading' => 'Automation',
     'admin.settings.automation.cloud_subtitle' => 'Scheduled publishing, backups, and review reports run automatically in the background with Managed Cloud — no setup needed.',
+    'admin.settings.automation.demo_heading' => 'Automation',
+    'admin.settings.automation.demo_subtitle' => 'Fixed in the demo and reset to its starting state on the next reset — not editable here.',
     'admin.settings.automation.cron_heading' => 'Automation (Cron)',
     'admin.settings.automation.cron_subtitle' => 'Call these addresses externally via a cron job (or uptime monitor) so scheduled publishes go live, webhooks are delivered, and backups are created. All four are protected with a secret key — without the correct <code style="background:var(--border-soft);padding:1px 5px;border-radius:4px">?secret=</code> they respond with 403.',
     'admin.settings.automation.secret_regenerated' => 'New secret generated — please update your cron jobs with the addresses below.',
@@ -543,6 +546,7 @@ return [
     'admin.settings.project.name_label' => 'Project name',
     'admin.settings.project.domain_label' => 'Domain / subdomain',
     'admin.settings.project.domain_managed_hint' => 'Managed via your Managed Cloud customer portal, not editable here.',
+    'admin.settings.project.domain_demo_hint' => 'Fixed in the demo, not editable here.',
     'admin.settings.project.primary_lang_label' => 'Primary language',
     'admin.settings.project.active_langs_label' => 'Active languages (comma-separated, e.g. de,en,es)',
     'admin.settings.project.brand_color_label' => 'Accent color',

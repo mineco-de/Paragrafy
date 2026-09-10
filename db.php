@@ -2863,6 +2863,43 @@ function theme_base_css_admin(string $accent = '#F0A63C', bool $enableDarkMode =
     CSS;
 }
 
+function render_demo_countdown_banner(): string {
+    if (empty(get_config()['is_demo'])) {
+        return '';
+    }
+    ob_start();
+    ?>
+    <div class="pg-alert pg-alert-amber" style="margin-bottom:14px;font-size:12px;padding:10px 12px;" data-demo-server-time-ms="<?= (int) round(microtime(true) * 1000) ?>">
+        <span>
+            <?= t('admin.common.demo_banner.text', ['time' => '<span class="pg-demo-countdown-value">10:00</span>']) ?>
+        </span>
+    </div>
+    <script>
+        (function () {
+            var banners = document.querySelectorAll('[data-demo-server-time-ms]');
+            banners.forEach(function (banner) {
+                var serverTimeMs = parseInt(banner.getAttribute('data-demo-server-time-ms'), 10);
+                var clockOffsetMs = serverTimeMs - Date.now();
+                function render() {
+                    var msPerReset = 10 * 60 * 1000;
+                    var now = Date.now() + clockOffsetMs;
+                    var remaining = msPerReset - (now % msPerReset);
+                    var totalSeconds = Math.ceil(remaining / 1000);
+                    var mm = String(Math.floor(totalSeconds / 60)).padStart(2, '0');
+                    var ss = String(totalSeconds % 60).padStart(2, '0');
+                    banner.querySelectorAll('.pg-demo-countdown-value').forEach(function (el) {
+                        el.textContent = mm + ':' + ss;
+                    });
+                }
+                render();
+                setInterval(render, 1000);
+            });
+        })();
+    </script>
+    <?php
+    return (string) ob_get_clean();
+}
+
 function render_sidebar(string $active, array $project, array $projects): string {
     $items = [
         'dashboard' => ['/admin', t('admin.common.nav.dashboard'), 'grid'],
@@ -2890,6 +2927,8 @@ function render_sidebar(string $active, array $project, array $projects): string
             <div class="pg-logo-badge"><img src="/paragrafy.svg" alt="Paragrafy"></div>
             <span class="pg-logo-text">Paragrafy</span>
         </div>
+
+        <?= render_demo_countdown_banner() ?>
 
         <select class="pg-proj-select" onchange="location.href='/admin?project_id=' + this.value">
             <?php foreach ($projects as $p): ?>
