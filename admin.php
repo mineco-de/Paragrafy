@@ -924,11 +924,15 @@ function handle_reset_password(PDO $db): void {
             $upd->execute([password_hash($pass, PASSWORD_DEFAULT), $user['id']]);
             log_audit(null, '', t('admin.login.reset.audit_note', ['name' => $user['name']]));
 
-            session_regenerate_id(true);
-            $_SESSION['paragrafy_admin'] = true;
-            $_SESSION['paragrafy_user_id'] = (int)$user['id'];
-            $_SESSION['paragrafy_user_name'] = $user['name'];
-            $_SESSION['paragrafy_user_email'] = $user['email'];
+            // Ein neues Passwort ersetzt nicht den zweiten Faktor: TOTP-Nutzer muessen nach dem
+            // Reset genauso den Code eingeben wie beim normalen Login (siehe totp_pending-Handling
+            // oben in der action=login-Verzweigung), sonst waere ein abgefangener Reset-Token
+            // allein ausreichend, um TOTP komplett zu umgehen.
+            if (!empty($user['totp_enabled_at'])) {
+                $_SESSION['totp_pending'] = ['type' => 'user', 'user_id' => (int)$user['id'], 'started_at' => time()];
+            } else {
+                finalize_user_session($user);
+            }
             header('Location: /admin');
             exit;
         }

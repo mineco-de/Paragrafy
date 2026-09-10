@@ -1076,36 +1076,97 @@ function is_public_http_url(string $url): bool {
 }
 
 /**
+ * Loest eine Location-Header-Angabe (absolut oder relativ) gegen die zuletzt
+ * angefragte URL auf, damit ein Redirect-Ziel vor dem naechsten Fetch erneut
+ * durch is_public_http_url() geprueft werden kann.
+ */
+function resolve_redirect_url(string $baseUrl, string $location): ?string {
+    $location = trim($location);
+    if ($location === '') {
+        return null;
+    }
+    if (parse_url($location, PHP_URL_SCHEME) !== null) {
+        return $location;
+    }
+    $base = parse_url($baseUrl);
+    if (!$base || empty($base['host'])) {
+        return null;
+    }
+    $scheme = $base['scheme'] ?? 'https';
+    $host = $base['host'] . (isset($base['port']) ? ':' . $base['port'] : '');
+    if (str_starts_with($location, '//')) {
+        return $scheme . ':' . $location;
+    }
+    if (str_starts_with($location, '/')) {
+        return $scheme . '://' . $host . $location;
+    }
+    $basePath = $base['path'] ?? '/';
+    $dir = str_ends_with($basePath, '/') ? $basePath : (dirname($basePath) . '/');
+    return $scheme . '://' . $host . $dir . $location;
+}
+
+/**
  * Holt den Rohtext für den KI-Einlesemodus (BETA) entweder von einer URL oder aus
  * einer hochgeladenen Datei (.html/.htm/.txt direkt, .pdf via pdftotext falls vorhanden).
  */
 function fetch_raw_legal_text(string $source, string $type): array {
     if ($type === 'url') {
         $url = trim($source);
-        if (!is_public_http_url($url)) {
-            return ['success' => false, 'error' => t('db.ai_import.invalid_or_private_url')];
-        }
         if (!function_exists('curl_init')) {
             return ['success' => false, 'error' => t('db.deepl.curl_missing')];
         }
-        $ch = curl_init();
-        curl_setopt_array($ch, [
-            CURLOPT_URL => $url,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_MAXREDIRS => 3,
-            CURLOPT_TIMEOUT => 20,
-            CURLOPT_USERAGENT => 'Paragrafy-Import-Bot/1.0',
-            CURLOPT_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
-            CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
-        ]);
-        $body = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $err = curl_error($ch);
-        curl_close($ch);
 
-        if ($body === false || $err) {
-            return ['success' => false, 'error' => t('db.ai_import.fetch_failed', ['error' => $err])];
+        // CURLOPT_FOLLOWLOCATION wuerde is_public_http_url() nur auf die urspruengliche URL
+        // anwenden und dann jedem Redirect blind folgen (auch auf private/loopback-Adressen)
+        // -- deshalb Redirects hier manuell verfolgen und JEDES Ziel erneut validieren, statt
+        // der SSRF-Pruefung nur einmalig am Anfang zu vertrauen.
+        $maxRedirects = 3;
+        $body = null;
+        $httpCode = null;
+        $err = '';
+        for ($hop = 0; $hop <= $maxRedirects; $hop++) {
+            if (!is_public_http_url($url)) {
+                return ['success' => false, 'error' => t('db.ai_import.invalid_or_private_url')];
+            }
+            $ch = curl_init();
+            curl_setopt_array($ch, [
+                CURLOPT_URL => $url,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HEADER => true,
+                CURLOPT_FOLLOWLOCATION => false,
+                CURLOPT_TIMEOUT => 20,
+                CURLOPT_USERAGENT => 'Paragrafy-Import-Bot/1.0',
+                CURLOPT_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
+            ]);
+            $response = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+            $err = curl_error($ch);
+            curl_close($ch);
+
+            if ($response === false || $err) {
+                return ['success' => false, 'error' => t('db.ai_import.fetch_failed', ['error' => $err])];
+            }
+
+            if (in_array($httpCode, [301, 302, 303, 307, 308], true)) {
+                $headers = substr($response, 0, $headerSize);
+                if (!preg_match('/^Location:\s*(.+?)\s*$/mi', $headers, $m)) {
+                    return ['success' => false, 'error' => t('db.ai_import.fetch_http_error', ['code' => $httpCode])];
+                }
+                $nextUrl = resolve_redirect_url($url, $m[1]);
+                if ($nextUrl === null) {
+                    return ['success' => false, 'error' => t('db.ai_import.fetch_http_error', ['code' => $httpCode])];
+                }
+                $url = $nextUrl;
+                continue;
+            }
+
+            $body = substr($response, $headerSize);
+            break;
+        }
+
+        if ($body === null) {
+            return ['success' => false, 'error' => t('db.ai_import.fetch_http_error', ['code' => $httpCode ?? 0])];
         }
         if ($httpCode < 200 || $httpCode >= 300) {
             return ['success' => false, 'error' => t('db.ai_import.fetch_http_error', ['code' => $httpCode])];
