@@ -2869,25 +2869,31 @@ function render_demo_countdown_banner(): string {
     }
     ob_start();
     ?>
-    <div class="pg-alert pg-alert-amber" style="margin-bottom:14px;font-size:12px;padding:10px 12px;">
+    <div class="pg-alert pg-alert-amber" style="margin-bottom:14px;font-size:12px;padding:10px 12px;" data-demo-server-time-ms="<?= (int) round(microtime(true) * 1000) ?>">
         <span>
             <?= t('admin.common.demo_banner.text', ['time' => '<span class="pg-demo-countdown-value">10:00</span>']) ?>
         </span>
     </div>
     <script>
         (function () {
-            function render() {
-                var msPerReset = 10 * 60 * 1000;
-                var remaining = msPerReset - (Date.now() % msPerReset);
-                var totalSeconds = Math.ceil(remaining / 1000);
-                var mm = String(Math.floor(totalSeconds / 60)).padStart(2, '0');
-                var ss = String(totalSeconds % 60).padStart(2, '0');
-                document.querySelectorAll('.pg-demo-countdown-value').forEach(function (el) {
-                    el.textContent = mm + ':' + ss;
-                });
-            }
-            render();
-            setInterval(render, 1000);
+            var banners = document.querySelectorAll('[data-demo-server-time-ms]');
+            banners.forEach(function (banner) {
+                var serverTimeMs = parseInt(banner.getAttribute('data-demo-server-time-ms'), 10);
+                var clockOffsetMs = serverTimeMs - Date.now();
+                function render() {
+                    var msPerReset = 10 * 60 * 1000;
+                    var now = Date.now() + clockOffsetMs;
+                    var remaining = msPerReset - (now % msPerReset);
+                    var totalSeconds = Math.ceil(remaining / 1000);
+                    var mm = String(Math.floor(totalSeconds / 60)).padStart(2, '0');
+                    var ss = String(totalSeconds % 60).padStart(2, '0');
+                    banner.querySelectorAll('.pg-demo-countdown-value').forEach(function (el) {
+                        el.textContent = mm + ':' + ss;
+                    });
+                }
+                render();
+                setInterval(render, 1000);
+            });
         })();
     </script>
     <?php

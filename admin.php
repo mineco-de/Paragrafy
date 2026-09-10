@@ -1287,9 +1287,10 @@ function render_login_view(?string $error): void {
         </style>
     </head>
     <body>
-        <div style="width:340px;box-sizing:border-box;">
-            <?= render_demo_countdown_banner() ?>
-        </div>
+        <?php $demoBanner = render_demo_countdown_banner(); ?>
+        <?php if ($demoBanner !== ''): ?>
+            <div style="width:340px;box-sizing:border-box;"><?= $demoBanner ?></div>
+        <?php endif; ?>
         <div class="login-card">
             <div class="logo-header">
                 <img src="/paragrafy.svg" alt="Paragrafy">
