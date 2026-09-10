@@ -493,64 +493,104 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    if ($action === 'save_project') {
-        $activeLangs = implode(',', array_filter(array_map('trim', explode(',', $_POST['active_languages'] ?? 'de,en'))));
-        $brandColor = trim($_POST['brand_color'] ?? '#F0A63C');
-        // Secret-Felder werden im Formular nie mit ihrem echten Wert vorbefuellt (siehe Rendering
-        // weiter unten) -- ein leer abgeschicktes Feld heisst also "unveraendert lassen", nicht
-        // "loeschen", sonst wuerde jedes Speichern ohne Neueingabe die Secrets wegloeschen.
-        $deeplKey = trim($_POST['deepl_api_key'] ?? '') ?: (string)($project['deepl_api_key'] ?? '');
-        $aiProvider = in_array($_POST['ai_provider'] ?? '', ['claude', 'openai'], true) ? $_POST['ai_provider'] : '';
-        $aiApiKey = trim($_POST['ai_api_key'] ?? '') ?: (string)($project['ai_api_key'] ?? '');
-        $logoUrl = trim($_POST['logo_url'] ?? '');
-        $webhookUrl = trim($_POST['webhook_url'] ?? '');
-        $webhookSecret = trim($_POST['webhook_secret'] ?? '') ?: (string)($project['webhook_secret'] ?? '');
-        $auditMonths = max(1, (int)($_POST['audit_interval_months'] ?? 12));
-
-        $smtpHost = trim($_POST['smtp_host'] ?? '');
-        $smtpPort = (int)($_POST['smtp_port'] ?? 587);
-        $smtpUser = trim($_POST['smtp_user'] ?? '');
-        $smtpPass = trim($_POST['smtp_pass'] ?? '') ?: (string)($project['smtp_pass'] ?? '');
-        $smtpSecure = trim($_POST['smtp_secure'] ?? 'tls');
-        $smtpFrom = trim($_POST['smtp_from'] ?? '');
-        $auditRecipient = trim($_POST['audit_email_recipient'] ?? '');
-
-        $cookieBanner = !empty($_POST['cookie_banner_enabled']) ? 1 : 0;
-        $cookieBannerText = trim($_POST['cookie_banner_text'] ?? '');
-        $consentLogging = !empty($_POST['consent_logging_enabled']) ? 1 : 0;
-        $consentLogRetentionDays = max(0, (int)($_POST['consent_log_retention_days'] ?? 1095));
-        if (!str_starts_with($brandColor, '#')) {
-            $brandColor = '#' . $brandColor;
-        }
-
-        $isLockedInstance = !empty(get_config()['managed_cloud']) || !empty(get_config()['is_demo']);
-        $domainToSave = $isLockedInstance ? $project['domain'] : $_POST['domain'];
-
+    // Die Projekt-Einstellungsseite besteht aus mehreren unabhaengigen Formularen (Allgemein,
+    // Cookie-Banner, Consent-Log, E-Mail/SMTP, Webhook/API-Keys, Firma). Jedes Formular hat einen
+    // eigenen action-Wert und aktualisiert NUR seine eigenen Spalten -- frueher teilten sich alle
+    // Formulare einen gemeinsamen 'save_project'-Handler mit einem Riesen-UPDATE ueber alle Spalten,
+    // wofuer jedes Formular smtp_host, brand_color usw. der jeweils anderen Tabs als hidden-Input
+    // mitschicken musste. Diese hidden-Werte wurden beim Seiten-Rendern eingefroren, sodass das
+    // Speichern eines Tabs (z. B. Webhook) unabsichtlich Aenderungen aus einem anderen, gerade erst
+    // gespeicherten Tab (z. B. brand_color) wieder auf den alten Stand zuruecksetzte.
+    if (in_array($action, ['save_general', 'save_cookie_banner', 'save_consent_log', 'save_email', 'save_webhook', 'save_company'], true)) {
         // settings_updated_at wird bewusst nicht per CURRENT_TIMESTAMP gesetzt, sondern strikt
         // hochgezaehlt (+1s statt Gleichstand), damit Last-Modified/If-Modified-Since bei zwei
         // Aenderungen innerhalb derselben Sekunde nicht auf denselben Wert kollabiert -- siehe
         // cache.php (build_public_last_modified) und update_project_company_fields() in db.php,
         // die dasselbe Muster fahren.
-        $stmt = $db->prepare("
-            UPDATE projects SET
-                name=?, domain=?, brand_color=?, primary_lang=?, active_languages=?,
-                deepl_api_key=?, ai_provider=?, ai_api_key=?, logo_url=?, webhook_url=?, webhook_secret=?, audit_interval_months=?,
-                smtp_host=?, smtp_port=?, smtp_user=?, smtp_pass=?, smtp_secure=?, smtp_from=?, audit_email_recipient=?,
-                cookie_banner_enabled=?, cookie_banner_text=?, consent_logging_enabled=?, consent_log_retention_days=?,
-                company_name=?, address=?, email=?, phone=?, representative=?, register_info=?,
-                settings_updated_at=CASE WHEN datetime('now') > settings_updated_at THEN datetime('now') ELSE datetime(settings_updated_at, '+1 second') END,
-                settings_version=settings_version + 1
-            WHERE id=?
-        ");
-        $stmt->execute([
-            $_POST['name'], $domainToSave, $brandColor, $_POST['primary_lang'], $activeLangs,
-            $deeplKey, $aiProvider, $aiApiKey, $logoUrl, $webhookUrl, $webhookSecret, $auditMonths,
-            $smtpHost, $smtpPort, $smtpUser, $smtpPass, $smtpSecure, $smtpFrom, $auditRecipient,
-            $cookieBanner, $cookieBannerText, $consentLogging, $consentLogRetentionDays,
-            $_POST['company_name'], $_POST['address'], $_POST['email'], $_POST['phone'], $_POST['representative'], $_POST['register_info'],
-            $projectId
-        ]);
-        log_audit($projectId, $_POST['name'], t('admin.common.audit.settings_updated'));
+        $touchSql = "settings_updated_at=CASE WHEN datetime('now') > settings_updated_at THEN datetime('now') ELSE datetime(settings_updated_at, '+1 second') END, settings_version=settings_version + 1";
+        $auditName = $project['name'];
+
+        if ($action === 'save_general') {
+            $activeLangs = implode(',', array_filter(array_map('trim', explode(',', $_POST['active_languages'] ?? 'de,en'))));
+            $brandColor = trim($_POST['brand_color'] ?? '#F0A63C');
+            if (!str_starts_with($brandColor, '#')) {
+                $brandColor = '#' . $brandColor;
+            }
+            $logoUrl = trim($_POST['logo_url'] ?? '');
+            $auditMonths = max(1, (int)($_POST['audit_interval_months'] ?? 12));
+            $isLockedInstance = !empty(get_config()['managed_cloud']) || !empty(get_config()['is_demo']);
+            $domainToSave = $isLockedInstance ? $project['domain'] : $_POST['domain'];
+
+            $stmt = $db->prepare("
+                UPDATE projects SET
+                    name=?, domain=?, brand_color=?, primary_lang=?, active_languages=?, logo_url=?, audit_interval_months=?,
+                    $touchSql
+                WHERE id=?
+            ");
+            $stmt->execute([
+                $_POST['name'], $domainToSave, $brandColor, $_POST['primary_lang'], $activeLangs, $logoUrl, $auditMonths,
+                $projectId
+            ]);
+            $auditName = $_POST['name'];
+        } elseif ($action === 'save_cookie_banner') {
+            $cookieBanner = !empty($_POST['cookie_banner_enabled']) ? 1 : 0;
+            $cookieBannerText = trim($_POST['cookie_banner_text'] ?? '');
+
+            $stmt = $db->prepare("UPDATE projects SET cookie_banner_enabled=?, cookie_banner_text=?, $touchSql WHERE id=?");
+            $stmt->execute([$cookieBanner, $cookieBannerText, $projectId]);
+        } elseif ($action === 'save_consent_log') {
+            $consentLogging = !empty($_POST['consent_logging_enabled']) ? 1 : 0;
+            $consentLogRetentionDays = max(0, (int)($_POST['consent_log_retention_days'] ?? 1095));
+
+            $stmt = $db->prepare("UPDATE projects SET consent_logging_enabled=?, consent_log_retention_days=?, $touchSql WHERE id=?");
+            $stmt->execute([$consentLogging, $consentLogRetentionDays, $projectId]);
+        } elseif ($action === 'save_email') {
+            $smtpHost = trim($_POST['smtp_host'] ?? '');
+            $smtpPort = (int)($_POST['smtp_port'] ?? 587);
+            $smtpUser = trim($_POST['smtp_user'] ?? '');
+            // Secret-Felder werden im Formular nie mit ihrem echten Wert vorbefuellt (siehe Rendering
+            // weiter unten) -- ein leer abgeschicktes Feld heisst also "unveraendert lassen", nicht
+            // "loeschen", sonst wuerde jedes Speichern ohne Neueingabe die Secrets wegloeschen.
+            $smtpPass = trim($_POST['smtp_pass'] ?? '') ?: (string)($project['smtp_pass'] ?? '');
+            $smtpSecure = trim($_POST['smtp_secure'] ?? 'tls');
+            $smtpFrom = trim($_POST['smtp_from'] ?? '');
+            $auditRecipient = trim($_POST['audit_email_recipient'] ?? '');
+
+            $stmt = $db->prepare("
+                UPDATE projects SET
+                    smtp_host=?, smtp_port=?, smtp_user=?, smtp_pass=?, smtp_secure=?, smtp_from=?, audit_email_recipient=?,
+                    $touchSql
+                WHERE id=?
+            ");
+            $stmt->execute([$smtpHost, $smtpPort, $smtpUser, $smtpPass, $smtpSecure, $smtpFrom, $auditRecipient, $projectId]);
+        } elseif ($action === 'save_webhook') {
+            $webhookUrl = trim($_POST['webhook_url'] ?? '');
+            $webhookSecret = trim($_POST['webhook_secret'] ?? '') ?: (string)($project['webhook_secret'] ?? '');
+            $deeplKey = trim($_POST['deepl_api_key'] ?? '') ?: (string)($project['deepl_api_key'] ?? '');
+            $aiProvider = in_array($_POST['ai_provider'] ?? '', ['claude', 'openai'], true) ? $_POST['ai_provider'] : '';
+            $aiApiKey = trim($_POST['ai_api_key'] ?? '') ?: (string)($project['ai_api_key'] ?? '');
+
+            $stmt = $db->prepare("
+                UPDATE projects SET
+                    webhook_url=?, webhook_secret=?, deepl_api_key=?, ai_provider=?, ai_api_key=?,
+                    $touchSql
+                WHERE id=?
+            ");
+            $stmt->execute([$webhookUrl, $webhookSecret, $deeplKey, $aiProvider, $aiApiKey, $projectId]);
+        } elseif ($action === 'save_company') {
+            $stmt = $db->prepare("
+                UPDATE projects SET
+                    company_name=?, address=?, email=?, phone=?, representative=?, register_info=?,
+                    $touchSql
+                WHERE id=?
+            ");
+            $stmt->execute([
+                $_POST['company_name'], $_POST['address'], $_POST['email'], $_POST['phone'], $_POST['representative'], $_POST['register_info'],
+                $projectId
+            ]);
+        }
+
+        log_audit($projectId, $auditName, t('admin.common.audit.settings_updated'));
         header("Location: /admin/settings?project_id=$projectId&msg=saved");
         exit;
     }
@@ -1945,7 +1985,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                         <h2 style="margin-bottom:18px"><?= t('admin.settings.project.heading') ?></h2>
                         <form method="post">
                             <?= csrf_field() ?>
-                            <input type="hidden" name="action" value="save_project">
+                            <input type="hidden" name="action" value="save_general">
 
                             <div class="grid">
                                 <div>
@@ -1994,27 +2034,6 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                                 <div class="pg-hint"><?= htmlspecialchars(t('admin.settings.project.audit_interval_hint')) ?></div>
                             </div>
 
-                            <input type="hidden" name="cookie_banner_enabled" value="<?= !empty($project['cookie_banner_enabled']) ? '1' : '0' ?>">
-                            <input type="hidden" name="cookie_banner_text" value="<?= htmlspecialchars($project['cookie_banner_text'] ?? '') ?>">
-                            <input type="hidden" name="consent_logging_enabled" value="<?= !empty($project['consent_logging_enabled']) ? '1' : '0' ?>">
-                            <input type="hidden" name="consent_log_retention_days" value="<?= htmlspecialchars((string)($project['consent_log_retention_days'] ?? 1095)) ?>">
-                            <input type="hidden" name="smtp_host" value="<?= htmlspecialchars($project['smtp_host'] ?? '') ?>">
-                            <input type="hidden" name="smtp_port" value="<?= htmlspecialchars((string)($project['smtp_port'] ?? 587)) ?>">
-                            <input type="hidden" name="smtp_user" value="<?= htmlspecialchars($project['smtp_user'] ?? '') ?>">
-                            <input type="hidden" name="smtp_pass" value="">
-                            <input type="hidden" name="smtp_secure" value="<?= htmlspecialchars($project['smtp_secure'] ?? 'tls') ?>">
-                            <input type="hidden" name="smtp_from" value="<?= htmlspecialchars($project['smtp_from'] ?? '') ?>">
-                            <input type="hidden" name="audit_email_recipient" value="<?= htmlspecialchars($project['audit_email_recipient'] ?? '') ?>">
-                            <input type="hidden" name="webhook_url" value="<?= htmlspecialchars($project['webhook_url'] ?? '') ?>">
-                            <input type="hidden" name="webhook_secret" value="">
-                            <input type="hidden" name="deepl_api_key" value="">
-                            <input type="hidden" name="company_name" value="<?= htmlspecialchars($project['company_name'] ?? '') ?>">
-                            <input type="hidden" name="representative" value="<?= htmlspecialchars($project['representative'] ?? '') ?>">
-                            <input type="hidden" name="address" value="<?= htmlspecialchars($project['address'] ?? '') ?>">
-                            <input type="hidden" name="email" value="<?= htmlspecialchars($project['email'] ?? '') ?>">
-                            <input type="hidden" name="phone" value="<?= htmlspecialchars($project['phone'] ?? '') ?>">
-                            <input type="hidden" name="register_info" value="<?= htmlspecialchars($project['register_info'] ?? '') ?>">
-
                             <div style="margin-top:18px">
                                 <button type="submit" class="pg-btn"><?= svg_icon('disk', '', 16) ?> <?= htmlspecialchars(t('admin.settings.project.save_button')) ?></button>
                             </div>
@@ -2026,32 +2045,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                         <p class="pg-card-sub" style="margin-bottom:16px"><?= t('admin.settings.cookie.subtitle') ?></p>
                         <form method="post">
                             <?= csrf_field() ?>
-                            <input type="hidden" name="action" value="save_project">
-                            <input type="hidden" name="name" value="<?= htmlspecialchars($project['name']) ?>">
-                            <input type="hidden" name="domain" value="<?= htmlspecialchars($project['domain']) ?>">
-                            <input type="hidden" name="primary_lang" value="<?= htmlspecialchars($project['primary_lang']) ?>">
-                            <input type="hidden" name="active_languages" value="<?= htmlspecialchars($project['active_languages']) ?>">
-                            <input type="hidden" name="brand_color" value="<?= htmlspecialchars($project['brand_color'] ?: '#F0A63C') ?>">
-                            <input type="hidden" name="logo_url" value="<?= htmlspecialchars($project['logo_url'] ?? '') ?>">
-                            <input type="hidden" name="audit_interval_months" value="<?= htmlspecialchars((string)($project['audit_interval_months'] ?? 12)) ?>">
-                            <input type="hidden" name="smtp_host" value="<?= htmlspecialchars($project['smtp_host'] ?? '') ?>">
-                            <input type="hidden" name="smtp_port" value="<?= htmlspecialchars((string)($project['smtp_port'] ?? 587)) ?>">
-                            <input type="hidden" name="smtp_user" value="<?= htmlspecialchars($project['smtp_user'] ?? '') ?>">
-                            <input type="hidden" name="smtp_pass" value="">
-                            <input type="hidden" name="smtp_secure" value="<?= htmlspecialchars($project['smtp_secure'] ?? 'tls') ?>">
-                            <input type="hidden" name="smtp_from" value="<?= htmlspecialchars($project['smtp_from'] ?? '') ?>">
-                            <input type="hidden" name="audit_email_recipient" value="<?= htmlspecialchars($project['audit_email_recipient'] ?? '') ?>">
-                            <input type="hidden" name="webhook_url" value="<?= htmlspecialchars($project['webhook_url'] ?? '') ?>">
-                            <input type="hidden" name="webhook_secret" value="">
-                            <input type="hidden" name="deepl_api_key" value="">
-                            <input type="hidden" name="company_name" value="<?= htmlspecialchars($project['company_name'] ?? '') ?>">
-                            <input type="hidden" name="representative" value="<?= htmlspecialchars($project['representative'] ?? '') ?>">
-                            <input type="hidden" name="address" value="<?= htmlspecialchars($project['address'] ?? '') ?>">
-                            <input type="hidden" name="email" value="<?= htmlspecialchars($project['email'] ?? '') ?>">
-                            <input type="hidden" name="phone" value="<?= htmlspecialchars($project['phone'] ?? '') ?>">
-                            <input type="hidden" name="register_info" value="<?= htmlspecialchars($project['register_info'] ?? '') ?>">
-                            <input type="hidden" name="consent_logging_enabled" value="<?= !empty($project['consent_logging_enabled']) ? '1' : '0' ?>">
-                            <input type="hidden" name="consent_log_retention_days" value="<?= htmlspecialchars((string)($project['consent_log_retention_days'] ?? 1095)) ?>">
+                            <input type="hidden" name="action" value="save_cookie_banner">
 
                             <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500;cursor:pointer">
                                 <input type="checkbox" name="cookie_banner_enabled" value="1" <?= !empty($project['cookie_banner_enabled']) ? 'checked' : '' ?>>
@@ -2072,32 +2066,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                         <p class="pg-card-sub" style="margin-bottom:16px"><?= t('admin.settings.consent_log.subtitle') ?></p>
                         <form method="post">
                             <?= csrf_field() ?>
-                            <input type="hidden" name="action" value="save_project">
-                            <input type="hidden" name="name" value="<?= htmlspecialchars($project['name']) ?>">
-                            <input type="hidden" name="domain" value="<?= htmlspecialchars($project['domain']) ?>">
-                            <input type="hidden" name="primary_lang" value="<?= htmlspecialchars($project['primary_lang']) ?>">
-                            <input type="hidden" name="active_languages" value="<?= htmlspecialchars($project['active_languages']) ?>">
-                            <input type="hidden" name="brand_color" value="<?= htmlspecialchars($project['brand_color'] ?: '#F0A63C') ?>">
-                            <input type="hidden" name="logo_url" value="<?= htmlspecialchars($project['logo_url'] ?? '') ?>">
-                            <input type="hidden" name="audit_interval_months" value="<?= htmlspecialchars((string)($project['audit_interval_months'] ?? 12)) ?>">
-                            <?php if (!empty($project['cookie_banner_enabled'])): ?><input type="hidden" name="cookie_banner_enabled" value="1"><?php endif; ?>
-                            <input type="hidden" name="cookie_banner_text" value="<?= htmlspecialchars($project['cookie_banner_text'] ?? '') ?>">
-                            <input type="hidden" name="smtp_host" value="<?= htmlspecialchars($project['smtp_host'] ?? '') ?>">
-                            <input type="hidden" name="smtp_port" value="<?= htmlspecialchars((string)($project['smtp_port'] ?? 587)) ?>">
-                            <input type="hidden" name="smtp_user" value="<?= htmlspecialchars($project['smtp_user'] ?? '') ?>">
-                            <input type="hidden" name="smtp_pass" value="">
-                            <input type="hidden" name="smtp_secure" value="<?= htmlspecialchars($project['smtp_secure'] ?? 'tls') ?>">
-                            <input type="hidden" name="smtp_from" value="<?= htmlspecialchars($project['smtp_from'] ?? '') ?>">
-                            <input type="hidden" name="audit_email_recipient" value="<?= htmlspecialchars($project['audit_email_recipient'] ?? '') ?>">
-                            <input type="hidden" name="webhook_url" value="<?= htmlspecialchars($project['webhook_url'] ?? '') ?>">
-                            <input type="hidden" name="webhook_secret" value="">
-                            <input type="hidden" name="deepl_api_key" value="">
-                            <input type="hidden" name="company_name" value="<?= htmlspecialchars($project['company_name'] ?? '') ?>">
-                            <input type="hidden" name="representative" value="<?= htmlspecialchars($project['representative'] ?? '') ?>">
-                            <input type="hidden" name="address" value="<?= htmlspecialchars($project['address'] ?? '') ?>">
-                            <input type="hidden" name="email" value="<?= htmlspecialchars($project['email'] ?? '') ?>">
-                            <input type="hidden" name="phone" value="<?= htmlspecialchars($project['phone'] ?? '') ?>">
-                            <input type="hidden" name="register_info" value="<?= htmlspecialchars($project['register_info'] ?? '') ?>">
+                            <input type="hidden" name="action" value="save_consent_log">
 
                             <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500;cursor:pointer">
                                 <input type="checkbox" name="consent_logging_enabled" value="1" <?= !empty($project['consent_logging_enabled']) ? 'checked' : '' ?>>
@@ -2122,27 +2091,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                         <p class="pg-card-sub" style="margin-bottom:16px"><?= htmlspecialchars(t('admin.settings.email.subtitle')) ?></p>
                         <form method="post">
                             <?= csrf_field() ?>
-                            <input type="hidden" name="action" value="save_project">
-                            <input type="hidden" name="name" value="<?= htmlspecialchars($project['name']) ?>">
-                            <input type="hidden" name="domain" value="<?= htmlspecialchars($project['domain']) ?>">
-                            <input type="hidden" name="primary_lang" value="<?= htmlspecialchars($project['primary_lang']) ?>">
-                            <input type="hidden" name="active_languages" value="<?= htmlspecialchars($project['active_languages']) ?>">
-                            <input type="hidden" name="brand_color" value="<?= htmlspecialchars($project['brand_color'] ?: '#F0A63C') ?>">
-                            <input type="hidden" name="logo_url" value="<?= htmlspecialchars($project['logo_url'] ?? '') ?>">
-                            <input type="hidden" name="audit_interval_months" value="<?= htmlspecialchars((string)($project['audit_interval_months'] ?? 12)) ?>">
-                            <?php if (!empty($project['cookie_banner_enabled'])): ?><input type="hidden" name="cookie_banner_enabled" value="1"><?php endif; ?>
-                            <input type="hidden" name="cookie_banner_text" value="<?= htmlspecialchars($project['cookie_banner_text'] ?? '') ?>">
-                            <input type="hidden" name="consent_logging_enabled" value="<?= !empty($project['consent_logging_enabled']) ? '1' : '0' ?>">
-                            <input type="hidden" name="consent_log_retention_days" value="<?= htmlspecialchars((string)($project['consent_log_retention_days'] ?? 1095)) ?>">
-                            <input type="hidden" name="webhook_url" value="<?= htmlspecialchars($project['webhook_url'] ?? '') ?>">
-                            <input type="hidden" name="webhook_secret" value="">
-                            <input type="hidden" name="deepl_api_key" value="">
-                            <input type="hidden" name="company_name" value="<?= htmlspecialchars($project['company_name'] ?? '') ?>">
-                            <input type="hidden" name="representative" value="<?= htmlspecialchars($project['representative'] ?? '') ?>">
-                            <input type="hidden" name="address" value="<?= htmlspecialchars($project['address'] ?? '') ?>">
-                            <input type="hidden" name="email" value="<?= htmlspecialchars($project['email'] ?? '') ?>">
-                            <input type="hidden" name="phone" value="<?= htmlspecialchars($project['phone'] ?? '') ?>">
-                            <input type="hidden" name="register_info" value="<?= htmlspecialchars($project['register_info'] ?? '') ?>">
+                            <input type="hidden" name="action" value="save_email">
 
                             <div class="grid">
                                 <div>
@@ -2198,31 +2147,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                         <p class="pg-card-sub" style="margin-bottom:16px"><?= htmlspecialchars(t('admin.settings.webhooks.subtitle')) ?></p>
                         <form method="post">
                             <?= csrf_field() ?>
-                            <input type="hidden" name="action" value="save_project">
-                            <input type="hidden" name="name" value="<?= htmlspecialchars($project['name']) ?>">
-                            <input type="hidden" name="domain" value="<?= htmlspecialchars($project['domain']) ?>">
-                            <input type="hidden" name="primary_lang" value="<?= htmlspecialchars($project['primary_lang']) ?>">
-                            <input type="hidden" name="active_languages" value="<?= htmlspecialchars($project['active_languages']) ?>">
-                            <input type="hidden" name="brand_color" value="<?= htmlspecialchars($project['brand_color'] ?: '#F0A63C') ?>">
-                            <input type="hidden" name="logo_url" value="<?= htmlspecialchars($project['logo_url'] ?? '') ?>">
-                            <input type="hidden" name="audit_interval_months" value="<?= htmlspecialchars((string)($project['audit_interval_months'] ?? 12)) ?>">
-                            <?php if (!empty($project['cookie_banner_enabled'])): ?><input type="hidden" name="cookie_banner_enabled" value="1"><?php endif; ?>
-                            <input type="hidden" name="cookie_banner_text" value="<?= htmlspecialchars($project['cookie_banner_text'] ?? '') ?>">
-                            <input type="hidden" name="consent_logging_enabled" value="<?= !empty($project['consent_logging_enabled']) ? '1' : '0' ?>">
-                            <input type="hidden" name="consent_log_retention_days" value="<?= htmlspecialchars((string)($project['consent_log_retention_days'] ?? 1095)) ?>">
-                            <input type="hidden" name="smtp_host" value="<?= htmlspecialchars($project['smtp_host'] ?? '') ?>">
-                            <input type="hidden" name="smtp_port" value="<?= htmlspecialchars((string)($project['smtp_port'] ?? 587)) ?>">
-                            <input type="hidden" name="smtp_user" value="<?= htmlspecialchars($project['smtp_user'] ?? '') ?>">
-                            <input type="hidden" name="smtp_pass" value="">
-                            <input type="hidden" name="smtp_secure" value="<?= htmlspecialchars($project['smtp_secure'] ?? 'tls') ?>">
-                            <input type="hidden" name="smtp_from" value="<?= htmlspecialchars($project['smtp_from'] ?? '') ?>">
-                            <input type="hidden" name="audit_email_recipient" value="<?= htmlspecialchars($project['audit_email_recipient'] ?? '') ?>">
-                            <input type="hidden" name="company_name" value="<?= htmlspecialchars($project['company_name'] ?? '') ?>">
-                            <input type="hidden" name="representative" value="<?= htmlspecialchars($project['representative'] ?? '') ?>">
-                            <input type="hidden" name="address" value="<?= htmlspecialchars($project['address'] ?? '') ?>">
-                            <input type="hidden" name="email" value="<?= htmlspecialchars($project['email'] ?? '') ?>">
-                            <input type="hidden" name="phone" value="<?= htmlspecialchars($project['phone'] ?? '') ?>">
-                            <input type="hidden" name="register_info" value="<?= htmlspecialchars($project['register_info'] ?? '') ?>">
+                            <input type="hidden" name="action" value="save_webhook">
 
                             <label class="pg-label" style="margin-top:0"><?= htmlspecialchars(t('admin.settings.webhooks.url_label')) ?><?= help_icon(t('admin.settings.webhooks.url_help')) ?></label>
                             <input type="text" name="webhook_url" value="<?= htmlspecialchars($project['webhook_url'] ?? '') ?>" placeholder="https://app.deinefirma.de/api/legal-webhook" style="width:100%;margin-bottom:14px">
@@ -2268,28 +2193,7 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                         <p class="pg-card-sub" style="margin-bottom:16px"><?= t('admin.settings.company.subtitle') ?></p>
                         <form method="post">
                             <?= csrf_field() ?>
-                            <input type="hidden" name="action" value="save_project">
-                            <input type="hidden" name="name" value="<?= htmlspecialchars($project['name']) ?>">
-                            <input type="hidden" name="domain" value="<?= htmlspecialchars($project['domain']) ?>">
-                            <input type="hidden" name="primary_lang" value="<?= htmlspecialchars($project['primary_lang']) ?>">
-                            <input type="hidden" name="active_languages" value="<?= htmlspecialchars($project['active_languages']) ?>">
-                            <input type="hidden" name="brand_color" value="<?= htmlspecialchars($project['brand_color'] ?: '#F0A63C') ?>">
-                            <input type="hidden" name="logo_url" value="<?= htmlspecialchars($project['logo_url'] ?? '') ?>">
-                            <input type="hidden" name="audit_interval_months" value="<?= htmlspecialchars((string)($project['audit_interval_months'] ?? 12)) ?>">
-                            <?php if (!empty($project['cookie_banner_enabled'])): ?><input type="hidden" name="cookie_banner_enabled" value="1"><?php endif; ?>
-                            <input type="hidden" name="cookie_banner_text" value="<?= htmlspecialchars($project['cookie_banner_text'] ?? '') ?>">
-                            <input type="hidden" name="smtp_host" value="<?= htmlspecialchars($project['smtp_host'] ?? '') ?>">
-                            <input type="hidden" name="smtp_port" value="<?= htmlspecialchars((string)($project['smtp_port'] ?? 587)) ?>">
-                            <input type="hidden" name="smtp_user" value="<?= htmlspecialchars($project['smtp_user'] ?? '') ?>">
-                            <input type="hidden" name="smtp_pass" value="">
-                            <input type="hidden" name="smtp_secure" value="<?= htmlspecialchars($project['smtp_secure'] ?? 'tls') ?>">
-                            <input type="hidden" name="smtp_from" value="<?= htmlspecialchars($project['smtp_from'] ?? '') ?>">
-                            <input type="hidden" name="audit_email_recipient" value="<?= htmlspecialchars($project['audit_email_recipient'] ?? '') ?>">
-                            <input type="hidden" name="consent_logging_enabled" value="<?= !empty($project['consent_logging_enabled']) ? '1' : '0' ?>">
-                            <input type="hidden" name="consent_log_retention_days" value="<?= htmlspecialchars((string)($project['consent_log_retention_days'] ?? 1095)) ?>">
-                            <input type="hidden" name="webhook_url" value="<?= htmlspecialchars($project['webhook_url'] ?? '') ?>">
-                            <input type="hidden" name="webhook_secret" value="">
-                            <input type="hidden" name="deepl_api_key" value="">
+                            <input type="hidden" name="action" value="save_company">
 
                             <div class="grid">
                                 <div>
