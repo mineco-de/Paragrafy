@@ -15,7 +15,7 @@ Self-hosted headless backend for managing, translating, and publishing legal boi
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ed?logo=docker&logoColor=white)](#-docker-setup--deployment)
 [![GitHub stars](https://img.shields.io/github/stars/mineco-de/Paragrafy?style=social)](https://github.com/mineco-de/Paragrafy/stargazers)
 
-[Website](https://paragrafy.cloud) · [Live Demo](https://demo.paragrafy.cloud) · [Documentation](https://docs.paragrafy.cloud) · [Changelog](CHANGELOG.md)
+[Website](https://paragrafy.cloud) · [Live Demo](https://demo.paragrafy.cloud/admin) · [Documentation](https://docs.paragrafy.cloud) · [Changelog](CHANGELOG.md)
 
 </div>
 
