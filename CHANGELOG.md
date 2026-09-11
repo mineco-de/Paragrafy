@@ -8,6 +8,21 @@ Die Versionsnummer folgt **CalVer** (`JAHR.MONAT.BUILD`) statt SemVer:
 jeden Monat wieder bei `1`. Änderungen vor `2026.9.1` sind nicht rückwirkend
 erfasst — siehe dafür die Git-Historie.
 
+## [2026.9.17] - 2026-09-11
+
+### Fixed
+Custom cookie banner text was always shown in a single fixed language, regardless of the
+visitor's locale:
+
+- `projects.cookie_banner_text` stored a single plain string with no language dimension. The
+  surrounding buttons/labels already went through the app's i18n (`t()`/`current_locale()`), but
+  as soon as a project owner set a custom banner text (almost always in German), every visitor
+  saw that exact text regardless of their browser language. The column now stores a
+  locale => text JSON map (`cookie_banner_text_map()` in `db.php`); `render_consent_js()` picks
+  the text for the visitor's resolved locale and falls back to the translated default text when
+  no override exists for that locale. Existing plain-string values are read as belonging to the
+  project's primary language, so no data is lost.
+
 ## [2026.9.16] - 2026-09-10
 
 ### Security
