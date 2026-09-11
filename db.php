@@ -1928,6 +1928,24 @@ function current_locale(): string {
 }
 
 /**
+ * Liest den projektspezifischen Cookie-Banner-Text als Locale => Text Map.
+ * Neues Format ist ein JSON-Objekt (z.B. {"de": "...", "en": "..."}); ein
+ * alter Plain-String wird der Projekt-Primärsprache zugeordnet, damit
+ * bestehende Projekte ihren Text nicht verlieren.
+ */
+function cookie_banner_text_map(array $project): array {
+    $raw = trim($project['cookie_banner_text'] ?? '');
+    if ($raw === '') {
+        return [];
+    }
+    $decoded = json_decode($raw, true);
+    if (is_array($decoded)) {
+        return $decoded;
+    }
+    return [($project['primary_lang'] ?? 'de') => $raw];
+}
+
+/**
  * Translates a UI string key using lang/de.php as the exhaustive baseline,
  * overlaid with lang/<locale>.php when available. :placeholder params are
  * interpolated via strtr; pass $count to select a '<key>.plural' variant.

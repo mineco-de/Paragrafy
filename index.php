@@ -1012,7 +1012,9 @@ function render_embed_js(): void {
 function render_consent_js(?array $project): void {
     $brand = $project['brand_color'] ?? '#F0A63C';
     $primaryLang = $project['primary_lang'] ?? 'de';
-    $bannerText = trim($project['cookie_banner_text'] ?? '') ?: t('public.consent.default_text');
+    $locale = current_locale();
+    $bannerMap = cookie_banner_text_map($project ?? []);
+    $bannerText = trim($bannerMap[$locale] ?? '') ?: t('public.consent.default_text');
 
     // consent.js runs embedded on the CLIENT's website, so the privacy link
     // must be an absolute URL back to this Paragrafy instance -- a relative

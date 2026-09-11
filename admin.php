@@ -539,7 +539,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $auditName = $_POST['name'];
         } elseif ($action === 'save_cookie_banner') {
             $cookieBanner = !empty($_POST['cookie_banner_enabled']) ? 1 : 0;
-            $cookieBannerText = trim($_POST['cookie_banner_text'] ?? '');
+            $bannerMap = [];
+            foreach (ui_locales() as $code => $meta) {
+                $text = trim($_POST['cookie_banner_text'][$code] ?? '');
+                if ($text !== '') {
+                    $bannerMap[$code] = $text;
+                }
+            }
+            $cookieBannerText = $bannerMap ? json_encode($bannerMap, JSON_UNESCAPED_UNICODE) : '';
 
             $stmt = $db->prepare("UPDATE projects SET cookie_banner_enabled=?, cookie_banner_text=?, $touchSql WHERE id=?");
             $stmt->execute([$cookieBanner, $cookieBannerText, $projectId]);
@@ -2073,8 +2080,11 @@ function render_settings_view(PDO $db, array $project, array $projects): void {
                                 <?= htmlspecialchars(t('admin.settings.cookie.enable_label')) ?>
                             </label>
 
-                            <label class="pg-label"><?= htmlspecialchars(t('admin.settings.cookie.banner_text_label')) ?> <span style="color:var(--text-faint);font-weight:400"><?= htmlspecialchars(t('admin.settings.cookie.banner_text_hint')) ?></span><?= help_icon(t('admin.settings.cookie.banner_text_help')) ?></label>
-                            <textarea name="cookie_banner_text" rows="2" style="width:100%" placeholder="<?= htmlspecialchars(t('public.consent.default_text')) ?>"><?= htmlspecialchars($project['cookie_banner_text'] ?? '') ?></textarea>
+                            <?php $bannerMap = cookie_banner_text_map($project); ?>
+                            <?php foreach (ui_locales() as $code => $meta): ?>
+                                <label class="pg-label"><?= htmlspecialchars(t('admin.settings.cookie.banner_text_label')) ?> (<?= htmlspecialchars($meta['label'] ?? strtoupper($code)) ?>) <span style="color:var(--text-faint);font-weight:400"><?= htmlspecialchars(t('admin.settings.cookie.banner_text_hint')) ?></span><?= help_icon(t('admin.settings.cookie.banner_text_help')) ?></label>
+                                <textarea name="cookie_banner_text[<?= htmlspecialchars($code) ?>]" rows="2" style="width:100%;margin-bottom:10px" placeholder="<?= htmlspecialchars(t('public.consent.default_text')) ?>"><?= htmlspecialchars($bannerMap[$code] ?? '') ?></textarea>
+                            <?php endforeach; ?>
 
                             <div style="margin-top:16px">
                                 <button type="submit" class="pg-btn"><?= svg_icon('disk', '', 16) ?> <?= htmlspecialchars(t('admin.settings.project.save_button')) ?></button>
