@@ -352,7 +352,9 @@ Full documentation, guides, and API reference: **[docs.paragrafy.cloud](https://
 
 ## 🤝 Contributing
 
-Issues and pull requests are welcome. If you're planning a larger change, please open an issue first to discuss the approach.
+Issues and pull requests are welcome. If you're planning a larger change, please open an issue first to discuss the approach. See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup and commit message conventions ([Conventional Commits](https://www.conventionalcommits.org/), e.g. `fix(cookie-banner): use per-locale text`).
+
+Found a security vulnerability? Please don't open a public issue — see [SECURITY.md](SECURITY.md) for a discreet way to report it.
 
 ## 📄 License
 
@@ -365,3 +367,5 @@ Paragrafy is licensed under the [AGPL-3.0](LICENSE).
 - Documentation: [docs.paragrafy.cloud](https://docs.paragrafy.cloud)
 - Changelog: [CHANGELOG.md](CHANGELOG.md)
 - Webhook spec: [WEBHOOKS.md](WEBHOOKS.md)
+- Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)
+- Security policy: [SECURITY.md](SECURITY.md)

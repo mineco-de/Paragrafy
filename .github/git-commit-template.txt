@@ -1,0 +1,13 @@
+# <type>(<scope>): <short description>
+#
+# Allowed types: feat, fix, docs, style, refactor, test, chore
+# Example: fix(cookie-banner): use per-locale text instead of German fallback
+#
+# --- Body (optional) ---
+# Explain *why*, not just what. Wrap at ~72 chars.
+#
+# --- Footer (optional) ---
+# Reference related issues, e.g. "Closes #42"
+#
+# To use this template locally:
+#   git config commit.template .github/git-commit-template.txt
