@@ -136,6 +136,11 @@ if (!empty($parts) && $parts[0] === 'api') {
 }
 
 if (empty($parts)) {
+    $negotiated = negotiate_document_lang($activeLangs, $primaryLang);
+    if ($negotiated) {
+        header('Location: /' . $negotiated . '/', true, 302);
+        exit;
+    }
     render_public_overview($project, $db, $primaryLang, $primaryLang);
     exit;
 }
@@ -148,6 +153,14 @@ if (count($parts) === 1) {
     }
     $lang = $primaryLang;
     $slug = $first;
+
+    $negotiated = negotiate_document_lang($activeLangs, $primaryLang);
+    if ($negotiated && find_public_translation($db, (int)$project['id'], $negotiated, $slug)) {
+        $suffix = $isPreview ? '/preview' : '';
+        $qs = $_SERVER['QUERY_STRING'] ?? '';
+        header('Location: /' . $negotiated . '/' . $slug . $suffix . ($qs !== '' ? '?' . $qs : ''), true, 302);
+        exit;
+    }
 } else {
     $lang = strtolower($parts[0]);
     $slug = strtolower($parts[1]);
