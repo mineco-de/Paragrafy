@@ -1928,6 +1928,27 @@ function current_locale(): string {
 }
 
 /**
+ * Negotiates the document content language for an unprefixed public URL
+ * (e.g. /impressum) from the browser's Accept-Language header, restricted to
+ * the project's active_languages. Returns null (no redirect) if the header
+ * is missing, matches no active language, or only matches $primaryLang
+ * (which is already served at the unprefixed URL).
+ */
+function negotiate_document_lang(array $activeLangs, string $primaryLang): ?string {
+    $accept = (string)($_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? '');
+    if ($accept === '') {
+        return null;
+    }
+    foreach (explode(',', $accept) as $part) {
+        $code = strtolower(substr(trim(explode(';', $part)[0]), 0, 2));
+        if ($code !== $primaryLang && in_array($code, $activeLangs, true)) {
+            return $code;
+        }
+    }
+    return null;
+}
+
+/**
  * Liest den projektspezifischen Cookie-Banner-Text als Locale => Text Map.
  * Neues Format ist ein JSON-Objekt (z.B. {"de": "...", "en": "..."}); ein
  * alter Plain-String wird der Projekt-Primärsprache zugeordnet, damit
