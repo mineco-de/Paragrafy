@@ -120,6 +120,8 @@ return [
     'editor.scheduled_notice' => '<strong>Zeitgesteuert geplant:</strong> Diese Version geht automatisch am <strong>:date Uhr</strong> live. Bis dahin bleibt der aktuelle Stand öffentlich.',
     'editor.preview_link' => 'Vorschau ansehen &rarr;',
     'editor.outdated_notice' => '<strong>Hinweis:</strong> Der Quelltext wurde seit der letzten Übersetzung geändert. Bitte gleiche den Zieltext an oder nutze DeepL.',
+    'editor.unfilled_placeholders_warning' => 'Achtung: Der Text enthält noch nicht ausgefüllte Platzhalter (:tokens). Beim Veröffentlichen würden diese sichtbar bleiben, statt durch echte Angaben ersetzt zu werden.',
+    'editor.publish_anyway_button' => 'Trotzdem veröffentlichen',
 
     'editor.add_language' => '+ Sprache hinzufügen',
     'editor.compare_toggle' => 'Andere Sprache zum Vergleich anzeigen',

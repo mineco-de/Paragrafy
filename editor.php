@@ -136,6 +136,8 @@ if (isset($_POST['action']) && $_POST['action'] === 'ai_import_apply_fields') {
 }
 
 // Speichern
+$pendingPublishConfirm = false;
+$pendingUnfilledTokens = [];
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
     if ($action === 'save_translation') {
@@ -145,14 +147,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $status = in_array($_POST['status'] ?? '', ['published', 'draft', 'scheduled'], true) ? $_POST['status'] : 'published';
         $changeNote = trim($_POST['change_note'] ?? '');
         $scheduledAt = !empty($_POST['scheduled_at']) ? str_replace('T', ' ', trim($_POST['scheduled_at'])) . ':00' : null;
-        
+        $confirmUnfilled = ($_POST['confirm_unfilled'] ?? '') === '1';
+
+        $pendingPublishConfirm = false;
+        $pendingUnfilledTokens = [];
+        if ($status === 'published' && !$confirmUnfilled) {
+            $stmtProject = $db->prepare("SELECT * FROM projects WHERE id = ?");
+            $stmtProject->execute([(int)$doc['project_id']]);
+            $projectRow = $stmtProject->fetch();
+            $pendingUnfilledTokens = $projectRow ? check_unfilled_placeholders($content, $projectRow) : [];
+            $pendingPublishConfirm = !empty($pendingUnfilledTokens);
+        }
+
         $sourceHashToSave = $currentSourceHash;
 
         $stmtOld = $db->prepare("SELECT content, title, slug FROM translations WHERE document_id = ? AND lang = ?");
         $stmtOld->execute([$docId, $targetLang]);
         $oldRow = $stmtOld->fetch();
 
-        if ($status === 'scheduled' && !empty($scheduledAt)) {
+        if ($pendingPublishConfirm) {
+            // Nicht speichern: Nutzer muss offene Platzhalter zuerst bestätigen.
+        } elseif ($status === 'scheduled' && !empty($scheduledAt)) {
             if ($oldRow) {
                 $stmt = $db->prepare("
                     UPDATE translations SET
@@ -216,8 +231,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             log_audit((int)$doc['project_id'], $doc['project_name'], t('editor.audit.saved', ['title' => $title, 'lang' => strtoupper($targetLang), 'status' => $statusLabel]));
         }
 
-        header("Location: /admin?project_id=" . ((int)$doc['project_id']) . "&msg=saved");
-        exit;
+        if (!$pendingPublishConfirm) {
+            header("Location: /admin?project_id=" . ((int)$doc['project_id']) . "&msg=saved");
+            exit;
+        }
     }
 
     if ($action === 'restore_version') {
@@ -284,6 +301,15 @@ $displayContent = $hasScheduled && !empty($targetTrans['scheduled_content']) ? $
 $displayTitle = $hasScheduled && !empty($targetTrans['scheduled_title']) ? $targetTrans['scheduled_title'] : $targetTrans['title'];
 $displaySlug = $hasScheduled && !empty($targetTrans['scheduled_slug']) ? $targetTrans['scheduled_slug'] : $targetTrans['slug'];
 $displayNote = $hasScheduled && !empty($targetTrans['scheduled_note']) ? $targetTrans['scheduled_note'] : $targetTrans['change_note'];
+
+$displayStatus = $hasScheduled ? 'scheduled' : $targetTrans['status'];
+if ($pendingPublishConfirm) {
+    $displayContent = $content;
+    $displayTitle = $title;
+    $displaySlug = $slug;
+    $displayNote = $changeNote;
+    $displayStatus = 'published';
+}
 
 $isOutdated = ($targetLang !== $sourceLang && !empty($targetTrans['source_hash']) && $targetTrans['source_hash'] !== $currentSourceHash);
 $showRef = count($activeLangs) > 1 && ($_GET['showRef'] ?? '0') === '1';
@@ -373,7 +399,7 @@ $isStandardDocType = find_reference_template_for_slug($doc['default_slug']) !== 
     </div>
     <?php endif; ?>
 
-    <?php if ($hasScheduled || $isOutdated): ?>
+    <?php if ($hasScheduled || $isOutdated || $pendingPublishConfirm): ?>
     <div style="max-width:1440px;margin:24px auto 0;padding:0 28px">
         <?php if ($hasScheduled): ?>
             <div class="scheduled-strip" style="border-radius:var(--radius)">
@@ -389,10 +415,18 @@ $isStandardDocType = find_reference_template_for_slug($doc['default_slug']) !== 
                 <span><?= t('editor.outdated_notice') ?></span>
             </div>
         <?php endif; ?>
+
+        <?php if ($pendingPublishConfirm): ?>
+            <div class="warning-strip" style="border-radius:var(--radius)">
+                <?= svg_icon('warning', '', 16) ?>
+                <span><?= htmlspecialchars(t('editor.unfilled_placeholders_warning', ['tokens' => implode(', ', $pendingUnfilledTokens)])) ?></span>
+                <button type="button" onclick="document.getElementById('confirmUnfilledInput').value='1'; prepareSubmit(); document.getElementById('editForm').submit();" style="margin-left:auto;font-weight:700;white-space:nowrap;background:none;border:1px solid currentColor;border-radius:var(--radius-sm);color:inherit;padding:4px 10px;cursor:pointer"><?= htmlspecialchars(t('editor.publish_anyway_button')) ?></button>
+            </div>
+        <?php endif; ?>
     </div>
     <?php endif; ?>
 
-    <div class="lang-tabs-row" style="max-width:1440px;margin:<?= ($hasScheduled || $isOutdated) ? '14px' : '24px' ?> auto 0;box-sizing:border-box">
+    <div class="lang-tabs-row" style="max-width:1440px;margin:<?= ($hasScheduled || $isOutdated || $pendingPublishConfirm) ? '14px' : '24px' ?> auto 0;box-sizing:border-box">
         <?php foreach ($activeLangs as $al): ?>
             <?php $alMeta = lang_meta($al); ?>
             <a href="/admin/edit?doc_id=<?= $docId ?>&lang=<?= $al ?>&showRef=<?= $showRef ? '1' : '0' ?>" class="lang-tab <?= $al === $targetLang ? 'active' : '' ?>"><?= $alMeta['flag'] ? $alMeta['flag'] . ' ' : '' ?><?= htmlspecialchars($alMeta['label']) ?></a>
@@ -451,6 +485,7 @@ $isStandardDocType = find_reference_template_for_slug($doc['default_slug']) !== 
                     <?= csrf_field() ?>
                     <input type="hidden" name="action" value="save_translation">
                     <input type="hidden" name="project_id" value="<?= $doc['project_id'] ?>">
+                    <input type="hidden" name="confirm_unfilled" id="confirmUnfilledInput" value="">
                     <textarea name="content" id="finalContentInput" style="display:none;"><?= htmlspecialchars($displayContent) ?></textarea>
 
                     <div class="pane-header">
@@ -520,9 +555,9 @@ $isStandardDocType = find_reference_template_for_slug($doc['default_slug']) !== 
 
                     <div style="display:flex; justify-content:space-between; align-items:center; margin-top:1.5rem; flex-wrap:wrap; gap:1rem;">
                         <select id="statusSelect" name="status" style="width:auto;" onchange="handleStatusChange(this.value)">
-                            <option value="published" <?= (!$hasScheduled && $targetTrans['status'] === 'published') ? 'selected' : '' ?>><?= htmlspecialchars(t('editor.status_publish_now')) ?></option>
-                            <option value="scheduled" <?= $hasScheduled ? 'selected' : '' ?>><?= htmlspecialchars(t('editor.status_schedule')) ?></option>
-                            <option value="draft" <?= (!$hasScheduled && $targetTrans['status'] === 'draft') ? 'selected' : '' ?>><?= htmlspecialchars(t('editor.status_draft')) ?></option>
+                            <option value="published" <?= ($displayStatus === 'published') ? 'selected' : '' ?>><?= htmlspecialchars(t('editor.status_publish_now')) ?></option>
+                            <option value="scheduled" <?= ($displayStatus === 'scheduled') ? 'selected' : '' ?>><?= htmlspecialchars(t('editor.status_schedule')) ?></option>
+                            <option value="draft" <?= ($displayStatus === 'draft') ? 'selected' : '' ?>><?= htmlspecialchars(t('editor.status_draft')) ?></option>
                         </select>
                         <div style="display:flex;align-items:center;gap:12px">
                             <span id="dirtyIndicator" style="display:none;font-size:12px;font-weight:600;color:var(--text-faint)"><?= htmlspecialchars(t('editor.unsaved_changes')) ?></span>
