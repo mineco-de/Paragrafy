@@ -106,6 +106,8 @@ return [
     'editor.scheduled_notice' => '<strong>Scheduled:</strong> This version goes live automatically on <strong>:date</strong>. Until then, the current version stays public.',
     'editor.preview_link' => 'View current version &rarr;',
     'editor.outdated_notice' => '<strong>Note:</strong> The source text has changed since the last translation. Please update the target text or use DeepL.',
+    'editor.unfilled_placeholders_warning' => 'Warning: the text still contains unfilled placeholders (:tokens). When published, these would stay visible instead of being replaced with real details.',
+    'editor.publish_anyway_button' => 'Publish anyway',
 
     'editor.add_language' => '+ Add language',
     'editor.compare_toggle' => 'Show another language for comparison',
