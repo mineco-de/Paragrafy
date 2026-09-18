@@ -8,6 +8,22 @@ Versioning follows **CalVer** (`YEAR.MONTH.BUILD`) instead of SemVer:
 `1` at the start of every month. Changes before `2026.9.1` were not captured
 retroactively — see the git history for those.
 
+## [2026.9.18] - 2026-09-18
+
+### Fixed
+A translation could go live with raw, unreplaced placeholder tokens visible on legally required
+pages:
+
+- Saving a translation in the editor (`editor.php`) with `status=published` published it
+  immediately even if the project fields referenced by its placeholder tokens (company_name,
+  address, email, phone, representative, register_info) were still empty — showing e.g. a raw
+  `{{company_name}}` on a live Impressum/Datenschutz page. The only warning was a passive
+  dashboard notice shown after the fact. The existing `check_unfilled_placeholders()` check
+  (already used for that dashboard notice) now also runs before a published save; if it finds
+  unfilled tokens, the editor re-renders with the submitted content preserved and requires an
+  explicit "Publish anyway" confirmation instead of publishing silently. `draft` and `scheduled`
+  saves are unaffected.
+
 ## [2026.9.17] - 2026-09-11
 
 ### Fixed
