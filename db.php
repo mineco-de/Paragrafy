@@ -1504,7 +1504,9 @@ function send_smtp_mail(array $project, string $to, string $subject, string $bod
  */
 function build_webhook_payload(array $project, array $eventData): array {
     $url = trim($project['webhook_url'] ?? '');
-    $projectId = (int)($project['id'] ?? ($project['project_id'] ?? 1));
+    // Callers pass joined rows (documents/translations JOIN projects) where `id` is the
+    // document/translation id and `project_id` the real project id -- so project_id wins.
+    $projectId = (int)($project['project_id'] ?? ($project['id'] ?? 1));
     $projectName = $project['name'] ?? ($project['project_name'] ?? 'Paragrafy');
     $projectDomain = $project['domain'] ?? '';
     $eventName = $eventData['event_type'] ?? 'legal_text.updated';
@@ -1645,12 +1647,18 @@ function enqueue_webhook(array $project, array $eventData): void {
     try {
         $built = build_webhook_payload($project, $eventData);
         if (empty($built['url']) || !is_public_http_url($built['url'])) {
+            // No/invalid URL is a normal "webhook not configured" state; only log when a URL
+            // is set but rejected, since that is the silent-failure case.
+            if (!empty($built['url'])) {
+                error_log('Paragrafy webhook not queued: URL rejected by is_public_http_url() (project ' . $built['project_id'] . ', event ' . $built['event_name'] . ')');
+            }
             return;
         }
         $db = get_db();
         $stmt = $db->prepare("INSERT INTO webhook_queue (project_id, event_name, payload, status, attempts, next_attempt_at) VALUES (?, ?, ?, 'pending', 0, CURRENT_TIMESTAMP)");
         $stmt->execute([$built['project_id'], $built['event_name'], $built['payload']]);
     } catch (Throwable $e) {
+        error_log('Paragrafy enqueue_webhook failed: ' . $e->getMessage());
     }
 }
 
