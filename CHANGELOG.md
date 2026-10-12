@@ -8,6 +8,19 @@ Versioning follows **CalVer** (`YEAR.MONTH.BUILD`) instead of SemVer:
 `1` at the start of every month. Changes before `2026.9.1` were not captured
 retroactively — see the git history for those.
 
+## [2026.10.1] - 2026-10-12
+
+### Fixed
+Real `legal_text.*` webhooks were never delivered:
+
+- `build_webhook_payload()` took `$project['id']` as the project id. For the joined rows passed by
+  `editor.php` and `check_and_publish_scheduled()` that is the document or translation id, so the
+  queued row and the payload's `project.id` carried the wrong id. `process_webhook_queue()` then
+  found no project and marked the row `failed` without any HTTP attempt. `project_id` now takes
+  precedence. Rows queued before this release stay `failed` and must be re-saved to be sent.
+- `enqueue_webhook()` no longer fails silently: exceptions and URLs rejected by
+  `is_public_http_url()` are written to the PHP error log.
+
 ## [2026.9.18] - 2026-09-18
 
 ### Fixed
