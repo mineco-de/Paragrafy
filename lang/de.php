@@ -111,6 +111,7 @@ return [
     'editor.audit.scheduled_for' => '„:title" (:lang) geplant für :date',
     'editor.audit.proposed' => 'Änderungsvorschlag für „:title" (:lang) abgelegt',
     'editor.pending_notice' => 'Änderungsvorschlag von :by (:date) wartet auf Freigabe. Die Live-Version ist unverändert.',
+    'editor.pending_scheduled' => 'Achtung: Die geplante Änderung dieses Textes wird mit der Freigabe verworfen.',
     'editor.pending_stale' => 'Der Live-Text wurde seit dem Vorschlag geändert, die Freigabe überschreibt diese Änderungen.',
     'editor.pending_approve' => 'Freigeben und veröffentlichen',
     'editor.pending_discard' => 'Verwerfen',

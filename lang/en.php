@@ -97,6 +97,7 @@ return [
     'editor.audit.scheduled_for' => '":title" (:lang) scheduled for :date',
     'editor.audit.proposed' => 'Proposed change for ":title" (:lang) stored',
     'editor.pending_notice' => 'Proposed change by :by (:date) is waiting for approval. The live version is unchanged.',
+    'editor.pending_scheduled' => 'Note: approving discards the scheduled change of this text.',
     'editor.pending_stale' => 'The live text changed after this proposal was made; approving will overwrite those changes.',
     'editor.pending_approve' => 'Approve and publish',
     'editor.pending_discard' => 'Discard',

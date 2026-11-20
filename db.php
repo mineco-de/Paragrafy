@@ -2408,9 +2408,23 @@ function propose_translation_change(PDO $db, array $doc, string $lang, array $in
     $slug = trim((string)($input['slug'] ?? ''));
     $note = trim((string)($input['change_note'] ?? ''));
 
-    $stmtOld = $db->prepare("SELECT content FROM translations WHERE document_id = ? AND lang = ?");
+    if ($title === '' || trim(strip_tags($content)) === '') {
+        return ['saved' => false, 'error' => 'title and content must not be empty', 'sanitize_report' => $report];
+    }
+    if ($slug !== '') {
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,98}$/', $slug)) {
+            return ['saved' => false, 'error' => 'invalid slug', 'sanitize_report' => $report];
+        }
+        $stmtDup = $db->prepare("SELECT 1 FROM translations t JOIN documents d ON d.id = t.document_id WHERE d.project_id = ? AND t.lang = ? AND t.slug = ? AND d.id != ? LIMIT 1");
+        $stmtDup->execute([(int)$doc['project_id'], $lang, $slug, $docId]);
+        if ($stmtDup->fetchColumn()) {
+            return ['saved' => false, 'error' => 'slug already used by another document in this language', 'sanitize_report' => $report];
+        }
+    }
+
+    $stmtOld = $db->prepare("SELECT title, slug, content FROM translations WHERE document_id = ? AND lang = ?");
     $stmtOld->execute([$docId, $lang]);
-    $baseHash = md5((string)($stmtOld->fetchColumn() ?: ''));
+    $baseHash = translation_state_hash($stmtOld->fetch() ?: null);
     $by = (string)($actor ?? ($_SESSION['paragrafy_user_name'] ?? 'Admin'));
 
     $db->prepare("
@@ -2423,6 +2437,10 @@ function propose_translation_change(PDO $db, array $doc, string $lang, array $in
 
     log_audit((int)$doc['project_id'], $doc['project_name'], t('editor.audit.proposed', ['title' => $title, 'lang' => strtoupper($lang)]), $by);
     return ['saved' => true, 'sanitize_report' => $report];
+}
+
+function translation_state_hash(?array $row): string {
+    return $row ? md5(($row['title'] ?? '') . "\n" . ($row['slug'] ?? '') . "\n" . ($row['content'] ?? '')) : md5('');
 }
 
 function get_pending_change(PDO $db, int $docId, string $lang): ?array {
@@ -2444,12 +2462,16 @@ function approve_pending_change(PDO $db, array $doc, string $lang, bool $confirm
     if (!$pending) {
         return ['saved' => false, 'needs_confirmation' => false, 'unfilled' => [], 'status' => 'published', 'no_pending' => true];
     }
+    $stmtSch = $db->prepare("SELECT scheduled_at FROM translations WHERE document_id = ? AND lang = ?");
+    $stmtSch->execute([(int)$doc['id'], $lang]);
+    $hadScheduled = !empty($stmtSch->fetchColumn());
     $result = save_translation_for_document($db, $doc, $lang, [
         'title' => $pending['title'], 'slug' => $pending['slug'], 'content' => $pending['content'],
         'status' => 'published', 'change_note' => $pending['change_note'], 'confirm_unfilled' => $confirmUnfilled,
     ], $actor);
     if (!empty($result['saved'])) {
         discard_pending_change($db, (int)$doc['id'], $lang);
+        $result['cancelled_scheduled_change'] = $hadScheduled;
     }
     return $result;
 }

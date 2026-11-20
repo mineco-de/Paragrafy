@@ -193,7 +193,7 @@ $targetTrans = $stmt->fetch() ?: [
 ];
 
 $pendingChange = get_pending_change($db, $docId, $targetLang);
-$pendingIsStale = $pendingChange && $pendingChange['base_hash'] !== md5((string)$targetTrans['content']);
+$pendingIsStale = $pendingChange && $pendingChange['base_hash'] !== translation_state_hash($targetTrans);
 $pendingApproveUnfilled = $pendingApproveUnfilled ?? [];
 $hasScheduled = !empty($targetTrans['scheduled_at']);
 $displayContent = $hasScheduled && !empty($targetTrans['scheduled_content']) ? $targetTrans['scheduled_content'] : $targetTrans['content'];
@@ -312,6 +312,7 @@ $isStandardDocType = find_reference_template_for_slug($doc['default_slug']) !== 
             <div class="warning-strip" style="border-radius:var(--radius);flex-wrap:wrap">
                 <?= svg_icon('warning', '', 16) ?>
                 <span><?= htmlspecialchars(t('editor.pending_notice', ['by' => $pendingChange['proposed_by'], 'date' => date('d.m.Y H:i', strtotime($pendingChange['created_at']))])) ?>
+                <?php if ($hasScheduled): ?> <strong><?= t('editor.pending_scheduled') ?></strong><?php endif; ?>
                 <?php if ($pendingIsStale): ?> <strong><?= t('editor.pending_stale') ?></strong><?php endif; ?>
                 <?php if ($pendingApproveUnfilled): ?> <strong><?= htmlspecialchars(t('editor.unfilled_placeholders_warning', ['tokens' => implode(', ', $pendingApproveUnfilled)])) ?></strong><?php endif; ?></span>
                 <form method="post" style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
@@ -324,7 +325,7 @@ $isStandardDocType = find_reference_template_for_slug($doc['default_slug']) !== 
                     <summary style="cursor:pointer"><?= t('editor.pending_show') ?></summary>
                     <div style="max-height:360px;overflow:auto;background:var(--surface,#fff);color:inherit;padding:12px;border-radius:8px;margin-top:8px">
                         <strong><?= htmlspecialchars($pendingChange['title']) ?></strong>
-                        <?= $pendingChange['content'] ?>
+                        <?= sanitize_legal_html((string)$pendingChange['content']) ?>
                     </div>
                 </details>
             </div>
