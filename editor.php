@@ -13,15 +13,7 @@ $db = get_db();
 $docId = (int)($_GET['doc_id'] ?? 0);
 $targetLang = strtolower($_GET['lang'] ?? 'de');
 
-$stmt = $db->prepare("
-    SELECT d.*, dt.title as type_title, dt.slug as default_slug, p.id as project_id, p.name as project_name, p.domain, p.primary_lang, p.active_languages, p.deepl_api_key, p.ai_provider, p.ai_api_key, p.webhook_url, p.webhook_secret, p.brand_color
-    FROM documents d
-    JOIN doc_types dt ON d.doc_type_id = dt.id
-    JOIN projects p ON d.project_id = p.id
-    WHERE d.id = ?
-");
-$stmt->execute([$docId]);
-$doc = $stmt->fetch();
+$doc = load_document_context($db, $docId);
 
 if (!$doc) {
     echo htmlspecialchars(t('editor.error.doc_not_found'));
@@ -138,98 +130,23 @@ if (isset($_POST['action']) && $_POST['action'] === 'ai_import_apply_fields') {
 // Speichern
 $pendingPublishConfirm = false;
 $pendingUnfilledTokens = [];
+$pendingSaveInput = [];
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
     if ($action === 'save_translation') {
-        $title = trim($_POST['title'] ?? '');
-        $slug = trim($_POST['slug'] ?? '');
-        $content = sanitize_legal_html($_POST['content'] ?? '');
-        $status = in_array($_POST['status'] ?? '', ['published', 'draft', 'scheduled'], true) ? $_POST['status'] : 'published';
-        $changeNote = trim($_POST['change_note'] ?? '');
-        $scheduledAt = !empty($_POST['scheduled_at']) ? str_replace('T', ' ', trim($_POST['scheduled_at'])) . ':00' : null;
-        $confirmUnfilled = ($_POST['confirm_unfilled'] ?? '') === '1';
-
-        $pendingPublishConfirm = false;
-        $pendingUnfilledTokens = [];
-        if ($status === 'published' && !$confirmUnfilled) {
-            $stmtProject = $db->prepare("SELECT * FROM projects WHERE id = ?");
-            $stmtProject->execute([(int)$doc['project_id']]);
-            $projectRow = $stmtProject->fetch();
-            $pendingUnfilledTokens = $projectRow ? check_unfilled_placeholders($content, $projectRow) : [];
-            $pendingPublishConfirm = !empty($pendingUnfilledTokens);
-        }
-
-        $sourceHashToSave = $currentSourceHash;
-
-        $stmtOld = $db->prepare("SELECT content, title, slug FROM translations WHERE document_id = ? AND lang = ?");
-        $stmtOld->execute([$docId, $targetLang]);
-        $oldRow = $stmtOld->fetch();
-
-        if ($pendingPublishConfirm) {
-            // Nicht speichern: Nutzer muss offene Platzhalter zuerst bestätigen.
-        } elseif ($status === 'scheduled' && !empty($scheduledAt)) {
-            if ($oldRow) {
-                $stmt = $db->prepare("
-                    UPDATE translations SET
-                        scheduled_at = ?,
-                        scheduled_title = ?,
-                        scheduled_slug = ?,
-                        scheduled_content = ?,
-                        scheduled_note = ?
-                    WHERE document_id = ? AND lang = ?
-                ");
-                $stmt->execute([$scheduledAt, $title, $slug, $content, $changeNote, $docId, $targetLang]);
-            } else {
-                $stmt = $db->prepare("
-                    INSERT INTO translations (document_id, lang, title, slug, content, previous_content, status, change_note, source_hash, scheduled_at, scheduled_title, scheduled_slug, scheduled_content, scheduled_note, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ");
-                $stmt->execute([$docId, $targetLang, $title, $slug, $content, $content, $changeNote, $sourceHashToSave, $scheduledAt, $title, $slug, $content, $changeNote]);
-            }
-
-            $currentSlugForPreview = $oldRow['slug'] ?? $slug;
-            enqueue_webhook($doc, [
-                'event_type' => 'legal_text.scheduled',
-                'document_id' => $docId,
-                'slug' => $slug,
-                'lang' => $targetLang,
-                'title' => $title,
-                'status' => 'scheduled',
-                'change_note' => $changeNote,
-                'scheduled_at' => date('c', strtotime($scheduledAt)),
-                'effective_date' => date('c', strtotime($scheduledAt)),
-                'preview_url' => 'https://' . $doc['domain'] . '/' . $targetLang . '/' . $currentSlugForPreview . '/preview',
-                'preview_api_url' => 'https://' . $doc['domain'] . '/api/' . $targetLang . '/' . $currentSlugForPreview . '/preview'
-            ]);
-            log_audit((int)$doc['project_id'], $doc['project_name'], t('editor.audit.scheduled_for', ['title' => $title, 'lang' => strtoupper($targetLang), 'date' => date('d.m.Y H:i', strtotime($scheduledAt))]));
-        } else {
-            $prevContent = $oldRow ? $oldRow['content'] : $content;
-            $stmt = $db->prepare("
-                INSERT INTO translations (document_id, lang, title, slug, content, previous_content, status, change_note, source_hash, scheduled_at, scheduled_title, scheduled_slug, scheduled_content, scheduled_note, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '', '', CURRENT_TIMESTAMP)
-                ON CONFLICT(document_id, lang) DO UPDATE SET
-                title=excluded.title, slug=excluded.slug, previous_content=translations.content, content=excluded.content, status=excluded.status, change_note=excluded.change_note, source_hash=excluded.source_hash, scheduled_at=NULL, scheduled_title='', scheduled_slug='', scheduled_content='', scheduled_note='', updated_at=CURRENT_TIMESTAMP
-            ");
-            $stmt->execute([$docId, $targetLang, $title, $slug, $content, $prevContent, $status, $changeNote, $sourceHashToSave]);
-            record_translation_version($db, $docId, $targetLang, $title, $slug, $content, $changeNote, $status);
-
-            if ($status === 'published') {
-                enqueue_webhook($doc, [
-                    'event_type' => 'legal_text.updated',
-                    'document_id' => $docId,
-                    'slug' => $slug,
-                    'lang' => $targetLang,
-                    'title' => $title,
-                    'status' => 'published',
-                    'change_note' => $changeNote,
-                    'was_scheduled' => false,
-                    'effective_date' => date('c'),
-                    'updated_at' => date('c')
-                ]);
-            }
-            $statusLabel = $status === 'published' ? t('editor.audit.status_published') : t('editor.audit.status_draft');
-            log_audit((int)$doc['project_id'], $doc['project_name'], t('editor.audit.saved', ['title' => $title, 'lang' => strtoupper($targetLang), 'status' => $statusLabel]));
-        }
+        $result = save_translation_for_document($db, $doc, $targetLang, [
+            'title' => $_POST['title'] ?? '',
+            'slug' => $_POST['slug'] ?? '',
+            'content' => $_POST['content'] ?? '',
+            'status' => $_POST['status'] ?? 'published',
+            'change_note' => $_POST['change_note'] ?? '',
+            'scheduled_at' => !empty($_POST['scheduled_at']) ? str_replace('T', ' ', trim($_POST['scheduled_at'])) . ':00' : null,
+            'confirm_unfilled' => ($_POST['confirm_unfilled'] ?? '') === '1',
+            'source_hash' => $currentSourceHash,
+        ]);
+        $pendingPublishConfirm = $result['needs_confirmation'];
+        $pendingUnfilledTokens = $result['unfilled'];
+        $pendingSaveInput = $result;
 
         if (!$pendingPublishConfirm) {
             header("Location: /admin?project_id=" . ((int)$doc['project_id']) . "&msg=saved");
@@ -238,42 +155,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if ($action === 'restore_version') {
-        $versionId = (int)($_POST['version_id'] ?? 0);
-        $stmtV = $db->prepare("SELECT * FROM translation_versions WHERE id = ? AND document_id = ? AND lang = ?");
-        $stmtV->execute([$versionId, $docId, $targetLang]);
-        $version = $stmtV->fetch();
-
-        if ($version) {
-            $stmtOld = $db->prepare("SELECT content FROM translations WHERE document_id = ? AND lang = ?");
-            $stmtOld->execute([$docId, $targetLang]);
-            $oldRow = $stmtOld->fetch();
-            $prevContent = $oldRow ? $oldRow['content'] : $version['content'];
-            $noteRestored = t('editor.restored_note', ['date' => date('d.m.Y H:i', strtotime($version['created_at']))]);
-
-            $stmt = $db->prepare("
-                INSERT INTO translations (document_id, lang, title, slug, content, previous_content, status, change_note, source_hash, scheduled_at, scheduled_title, scheduled_slug, scheduled_content, scheduled_note, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'published', ?, ?, NULL, '', '', '', '', CURRENT_TIMESTAMP)
-                ON CONFLICT(document_id, lang) DO UPDATE SET
-                title=excluded.title, slug=excluded.slug, previous_content=translations.content, content=excluded.content, status='published', change_note=excluded.change_note, source_hash=excluded.source_hash, scheduled_at=NULL, scheduled_title='', scheduled_slug='', scheduled_content='', scheduled_note='', updated_at=CURRENT_TIMESTAMP
-            ");
-            $stmt->execute([$docId, $targetLang, $version['title'], $version['slug'], $version['content'], $prevContent, $noteRestored, $currentSourceHash]);
-            record_translation_version($db, $docId, $targetLang, $version['title'], $version['slug'], $version['content'], $noteRestored, 'published');
-
-            enqueue_webhook($doc, [
-                'event_type' => 'legal_text.updated',
-                'document_id' => $docId,
-                'slug' => $version['slug'],
-                'lang' => $targetLang,
-                'title' => $version['title'],
-                'status' => 'published',
-                'change_note' => $noteRestored,
-                'was_scheduled' => false,
-                'effective_date' => date('c'),
-                'updated_at' => date('c')
-            ]);
-            log_audit((int)$doc['project_id'], $doc['project_name'], t('editor.audit.restored', ['title' => $version['title'], 'lang' => strtoupper($targetLang), 'note' => $noteRestored]));
-        }
-
+        restore_translation_version($db, $doc, $targetLang, (int)($_POST['version_id'] ?? 0), null, $currentSourceHash);
         header("Location: /admin/edit?doc_id=$docId&lang=$targetLang&msg=restored");
         exit;
     }
@@ -304,10 +186,10 @@ $displayNote = $hasScheduled && !empty($targetTrans['scheduled_note']) ? $target
 
 $displayStatus = $hasScheduled ? 'scheduled' : $targetTrans['status'];
 if ($pendingPublishConfirm) {
-    $displayContent = $content;
-    $displayTitle = $title;
-    $displaySlug = $slug;
-    $displayNote = $changeNote;
+    $displayContent = $pendingSaveInput['content'];
+    $displayTitle = $pendingSaveInput['title'];
+    $displaySlug = $pendingSaveInput['slug'];
+    $displayNote = $pendingSaveInput['change_note'];
     $displayStatus = 'published';
 }
 
