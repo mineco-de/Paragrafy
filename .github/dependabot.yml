@@ -4,6 +4,10 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      # 6.x requires PHP 8.5; Paragrafy supports PHP >=8.2
+      - dependency-name: "endroid/qr-code"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
