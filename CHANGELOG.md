@@ -8,6 +8,18 @@ Versioning follows **CalVer** (`YEAR.MONTH.BUILD`) instead of SemVer:
 `1` at the start of every month. Changes before `2026.9.1` were not captured
 retroactively — see the git history for those.
 
+## [2026.11.2] - 2026-11-20
+
+### Added
+- Proposed changes: a new text version can be stored next to the live text (`pending_changes`,
+  `propose_translation_change()`, `approve_pending_change()`, `discard_pending_change()`). The live
+  version stays unchanged until an admin approves the proposal in the editor, which then publishes it
+  through the normal path (versions, webhooks, audit log).
+- `sanitize_legal_html()` can report what it removed or changed (optional second argument).
+- `check_html_quality()` warns about unbalanced tags, brackets and quotes.
+- `default_slug_for_lang()`: new translations of standard documents get a slug in their own language
+  (e.g. `privacy-policy` for English). Existing slugs and URLs are not changed.
+
 ## [2026.11.1] - 2026-11-20
 
 ### Changed

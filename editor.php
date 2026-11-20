@@ -154,6 +154,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
+    if ($action === 'approve_pending' || $action === 'discard_pending') {
+        if ($action === 'discard_pending') {
+            discard_pending_change($db, $docId, $targetLang);
+            header("Location: /admin/edit?doc_id=$docId&lang=$targetLang&msg=pending_discarded");
+            exit;
+        }
+        $approveResult = approve_pending_change($db, $doc, $targetLang, ($_POST['confirm_unfilled'] ?? '') === '1');
+        if (!empty($approveResult['saved'])) {
+            header("Location: /admin/edit?doc_id=$docId&lang=$targetLang&msg=pending_approved");
+            exit;
+        }
+        $pendingApproveUnfilled = $approveResult['unfilled'] ?? [];
+    }
+
     if ($action === 'restore_version') {
         restore_translation_version($db, $doc, $targetLang, (int)($_POST['version_id'] ?? 0), null, $currentSourceHash);
         header("Location: /admin/edit?doc_id=$docId&lang=$targetLang&msg=restored");
@@ -166,7 +180,7 @@ $stmt = $db->prepare("SELECT * FROM translations WHERE document_id = ? AND lang 
 $stmt->execute([$docId, $targetLang]);
 $targetTrans = $stmt->fetch() ?: [
     'title' => $doc['type_title'],
-    'slug' => $doc['default_slug'],
+    'slug' => default_slug_for_lang($doc['default_slug'], $targetLang),
     'content' => '',
     'previous_content' => '',
     'change_note' => '',
@@ -178,6 +192,9 @@ $targetTrans = $stmt->fetch() ?: [
     'scheduled_note' => ''
 ];
 
+$pendingChange = get_pending_change($db, $docId, $targetLang);
+$pendingIsStale = $pendingChange && $pendingChange['base_hash'] !== md5((string)$targetTrans['content']);
+$pendingApproveUnfilled = $pendingApproveUnfilled ?? [];
 $hasScheduled = !empty($targetTrans['scheduled_at']);
 $displayContent = $hasScheduled && !empty($targetTrans['scheduled_content']) ? $targetTrans['scheduled_content'] : $targetTrans['content'];
 $displayTitle = $hasScheduled && !empty($targetTrans['scheduled_title']) ? $targetTrans['scheduled_title'] : $targetTrans['title'];
@@ -272,22 +289,44 @@ $isStandardDocType = find_reference_template_for_slug($doc['default_slug']) !== 
         <a href="/admin?project_id=<?= $doc['project_id'] ?>" style="margin-left:auto;font-size:13px;font-weight:600"><?= t('editor.back_to_dashboard') ?></a>
     </div>
 
-    <?php if (($_GET['msg'] ?? '') === 'restored'): ?>
+    <?php if (in_array(($_GET['msg'] ?? ''), ['restored', 'pending_approved', 'pending_discarded'], true)): ?>
     <div style="max-width:1440px;margin:24px auto 0;padding:0 28px">
         <div class="scheduled-strip" style="border-radius:var(--radius)">
             <?= svg_icon('check', '', 16) ?>
-            <span><?= htmlspecialchars(t('editor.msg.restored')) ?></span>
+            <span><?= htmlspecialchars(t('editor.msg.' . $_GET['msg'])) ?></span>
         </div>
     </div>
     <?php endif; ?>
 
-    <?php if ($hasScheduled || $isOutdated || $pendingPublishConfirm): ?>
+    <?php if ($hasScheduled || $isOutdated || $pendingPublishConfirm || $pendingChange): ?>
     <div style="max-width:1440px;margin:24px auto 0;padding:0 28px">
         <?php if ($hasScheduled): ?>
             <div class="scheduled-strip" style="border-radius:var(--radius)">
                 <?= svg_icon('calendar', '', 16) ?>
                 <span><?= t('editor.scheduled_notice', ['date' => date('d.m.Y \u\m H:i', strtotime($targetTrans['scheduled_at']))]) ?></span>
                 <a href="https://<?= htmlspecialchars($doc['domain']) ?>/<?= htmlspecialchars($targetLang) ?>/<?= htmlspecialchars($targetTrans['slug']) ?>/preview" target="_blank" style="margin-left:auto;font-weight:700;white-space:nowrap"><?= t('editor.preview_link') ?></a>
+            </div>
+        <?php endif; ?>
+
+        <?php if ($pendingChange): ?>
+            <div class="warning-strip" style="border-radius:var(--radius);flex-wrap:wrap">
+                <?= svg_icon('warning', '', 16) ?>
+                <span><?= htmlspecialchars(t('editor.pending_notice', ['by' => $pendingChange['proposed_by'], 'date' => date('d.m.Y H:i', strtotime($pendingChange['created_at']))])) ?>
+                <?php if ($pendingIsStale): ?> <strong><?= t('editor.pending_stale') ?></strong><?php endif; ?>
+                <?php if ($pendingApproveUnfilled): ?> <strong><?= htmlspecialchars(t('editor.unfilled_placeholders_warning', ['tokens' => implode(', ', $pendingApproveUnfilled)])) ?></strong><?php endif; ?></span>
+                <form method="post" style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
+                    <?= csrf_field() ?>
+                    <?php if ($pendingApproveUnfilled): ?><input type="hidden" name="confirm_unfilled" value="1"><?php endif; ?>
+                    <button type="submit" name="action" value="approve_pending" style="font-weight:700;white-space:nowrap;cursor:pointer"><?= t('editor.pending_approve') ?></button>
+                    <button type="submit" name="action" value="discard_pending" style="white-space:nowrap;cursor:pointer" onclick="return confirm('<?= htmlspecialchars(t('editor.pending_discard_confirm'), ENT_QUOTES) ?>')"><?= t('editor.pending_discard') ?></button>
+                </form>
+                <details style="flex-basis:100%;margin-top:8px">
+                    <summary style="cursor:pointer"><?= t('editor.pending_show') ?></summary>
+                    <div style="max-height:360px;overflow:auto;background:var(--surface,#fff);color:inherit;padding:12px;border-radius:8px;margin-top:8px">
+                        <strong><?= htmlspecialchars($pendingChange['title']) ?></strong>
+                        <?= $pendingChange['content'] ?>
+                    </div>
+                </details>
             </div>
         <?php endif; ?>
 
@@ -308,7 +347,7 @@ $isStandardDocType = find_reference_template_for_slug($doc['default_slug']) !== 
     </div>
     <?php endif; ?>
 
-    <div class="lang-tabs-row" style="max-width:1440px;margin:<?= ($hasScheduled || $isOutdated || $pendingPublishConfirm) ? '14px' : '24px' ?> auto 0;box-sizing:border-box">
+    <div class="lang-tabs-row" style="max-width:1440px;margin:<?= ($hasScheduled || $isOutdated || $pendingPublishConfirm || $pendingChange) ? '14px' : '24px' ?> auto 0;box-sizing:border-box">
         <?php foreach ($activeLangs as $al): ?>
             <?php $alMeta = lang_meta($al); ?>
             <a href="/admin/edit?doc_id=<?= $docId ?>&lang=<?= $al ?>&showRef=<?= $showRef ? '1' : '0' ?>" class="lang-tab <?= $al === $targetLang ? 'active' : '' ?>"><?= $alMeta['flag'] ? $alMeta['flag'] . ' ' : '' ?><?= htmlspecialchars($alMeta['label']) ?></a>
