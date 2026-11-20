@@ -130,6 +130,7 @@ if (isset($_POST['action']) && $_POST['action'] === 'ai_import_apply_fields') {
 // Speichern
 $pendingPublishConfirm = false;
 $pendingUnfilledTokens = [];
+$pendingSaveInput = [];
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
     if ($action === 'save_translation') {
@@ -145,6 +146,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         ]);
         $pendingPublishConfirm = $result['needs_confirmation'];
         $pendingUnfilledTokens = $result['unfilled'];
+        $pendingSaveInput = $result;
 
         if (!$pendingPublishConfirm) {
             header("Location: /admin?project_id=" . ((int)$doc['project_id']) . "&msg=saved");
@@ -184,10 +186,10 @@ $displayNote = $hasScheduled && !empty($targetTrans['scheduled_note']) ? $target
 
 $displayStatus = $hasScheduled ? 'scheduled' : $targetTrans['status'];
 if ($pendingPublishConfirm) {
-    $displayContent = $content;
-    $displayTitle = $title;
-    $displaySlug = $slug;
-    $displayNote = $changeNote;
+    $displayContent = $pendingSaveInput['content'];
+    $displayTitle = $pendingSaveInput['title'];
+    $displaySlug = $pendingSaveInput['slug'];
+    $displayNote = $pendingSaveInput['change_note'];
     $displayStatus = 'published';
 }
 

@@ -2125,7 +2125,8 @@ function load_document_context(PDO $db, int $docId): ?array {
  * change_note, scheduled_at ('Y-m-d H:i:s' or null), confirm_unfilled (bool), source_hash (?string).
  * $actor overrides the audit/version user name (default: current session user).
  *
- * Returns ['saved' => bool, 'needs_confirmation' => bool, 'unfilled' => string[], 'status' => string].
+ * Returns ['saved' => bool, 'needs_confirmation' => bool, 'unfilled' => string[], 'status' => string]
+ * (plus the sanitized 'title', 'slug', 'content', 'change_note' when confirmation is needed).
  * Published saves containing unfilled company placeholders are NOT saved unless confirm_unfilled is set.
  */
 function save_translation_for_document(PDO $db, array $doc, string $lang, array $input, ?string $actor = null): array {
@@ -2144,7 +2145,11 @@ function save_translation_for_document(PDO $db, array $doc, string $lang, array 
         $projectRow = $stmtProject->fetch();
         $unfilled = $projectRow ? check_unfilled_placeholders($content, $projectRow) : [];
         if ($unfilled) {
-            return ['saved' => false, 'needs_confirmation' => true, 'unfilled' => array_values($unfilled), 'status' => $status];
+            return [
+                'saved' => false, 'needs_confirmation' => true, 'unfilled' => array_values($unfilled), 'status' => $status,
+                // Sanitized input echoed back so the caller can re-render the form without losing the edit.
+                'title' => $title, 'slug' => $slug, 'content' => $content, 'change_note' => $changeNote,
+            ];
         }
     }
 
