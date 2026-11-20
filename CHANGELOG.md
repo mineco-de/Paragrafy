@@ -8,6 +8,14 @@ Versioning follows **CalVer** (`YEAR.MONTH.BUILD`) instead of SemVer:
 `1` at the start of every month. Changes before `2026.9.1` were not captured
 retroactively — see the git history for those.
 
+## [2026.11.1] - 2026-11-20
+
+### Changed
+- The save (draft / published / scheduled) and restore-version logic moved from `editor.php` into
+  reusable functions in `db.php` (`save_translation_for_document()`, `restore_translation_version()`,
+  `load_document_context()`). Admin editor behaviour is unchanged; `log_audit()` accepts an optional
+  actor name.
+
 ## [2026.10.1] - 2026-10-12
 
 ### Fixed
