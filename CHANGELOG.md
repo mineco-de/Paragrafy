@@ -8,6 +8,12 @@ Versioning follows **CalVer** (`YEAR.MONTH.BUILD`) instead of SemVer:
 `1` at the start of every month. Changes before `2026.9.1` were not captured
 retroactively — see the git history for those.
 
+## [2026.11.3] - 2026-11-20
+
+### Fixed
+- Public document page: in long documents the table of contents now scrolls along with the active
+  chapter instead of leaving it out of view; scroll chaining out of the list is prevented.
+
 ## [2026.11.2] - 2026-11-20
 
 ### Added

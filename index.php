@@ -619,7 +619,7 @@ function render_public_document(array $project, array $trans, string $content, a
 
             .toc-sidebar { position: sticky; top: 24px; border-left: 1px solid var(--border); padding-left: 24px; }
             .toc-title { font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--text-faint); letter-spacing: 0.06em; margin-bottom: 14px; }
-            .toc-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 11px; max-height: calc(100vh - 12rem); overflow-y: auto; }
+            .toc-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 11px; max-height: calc(100vh - 12rem); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
             .toc-link { display: block; font-size: 13px; color: var(--text-muted); text-decoration: none; border-left: 2px solid transparent; padding-left: 10px; margin-left: -11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
             .toc-link:hover { color: var(--text); }
             .toc-link.active { color: var(--accent); font-weight: 600; border-left-color: var(--accent); }
@@ -747,7 +747,15 @@ function render_public_document(array $project, array $trans, string $content, a
                         if (entry.isIntersecting) {
                             document.querySelectorAll('.toc-link').forEach(l => l.classList.remove('active'));
                             const activeLink = document.querySelector(`.toc-link[data-target="${entry.target.id}"]`);
-                            if (activeLink) activeLink.classList.add('active');
+                            if (activeLink) {
+                                activeLink.classList.add('active');
+                                // Lange Verzeichnisse: aktiven Eintrag in der Liste sichtbar halten (nur die Liste scrollen, nicht die Seite)
+                                const lr = tocList.getBoundingClientRect();
+                                const ar = activeLink.getBoundingClientRect();
+                                if (ar.top < lr.top + 8 || ar.bottom > lr.bottom - 8) {
+                                    tocList.scrollTo({ top: tocList.scrollTop + (ar.top - lr.top) - lr.height / 2 + ar.height / 2, behavior: 'smooth' });
+                                }
+                            }
                         }
                     });
                 }, { rootMargin: '0px 0px -70% 0px' });
