@@ -6,7 +6,7 @@ declare(strict_types=1);
 
 // CalVer: JAHR.MONAT.BUILD - BUILD zaehlt Releases innerhalb des Monats hoch (startet bei 1).
 // Siehe CHANGELOG.md fuer die Aenderungen je Version.
-define('PARAGRAFY_VERSION', '2026.11.1');
+define('PARAGRAFY_VERSION', '2026.11.2');
 define('PARAGRAFY_DIR', __DIR__);
 // Where persistent data (DB, config, backups, .env) lives. Defaults to the
 // code directory (bare-metal installs); set PARAGRAFY_DATA_DIR to point this
@@ -319,6 +319,24 @@ function ensure_schema_migrations(PDO $pdo): void {
             CREATE TABLE IF NOT EXISTS sso_nonces (
                 nonce TEXT PRIMARY KEY,
                 used_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+        ");
+
+        // Proposed changes to a text, waiting for a human to approve them (live text stays untouched).
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS pending_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id INTEGER NOT NULL,
+                lang TEXT NOT NULL,
+                title TEXT NOT NULL,
+                slug TEXT NOT NULL,
+                content TEXT NOT NULL,
+                change_note TEXT DEFAULT '',
+                proposed_by TEXT DEFAULT '',
+                base_hash TEXT DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
+                UNIQUE(document_id, lang)
             );
         ");
 
@@ -729,7 +747,8 @@ function help_icon(string $text): string {
  * (their content survives as plain text/inline markup); disallowed tags that
  * only make sense as executable/embedded content are dropped entirely.
  */
-function sanitize_legal_html(string $html): string {
+function sanitize_legal_html(string $html, ?array &$report = null): string {
+    $report = ['removed_tags' => [], 'unwrapped_tags' => [], 'removed_attributes' => [], 'comments_removed' => 0, 'links_rel_forced' => 0];
     if (trim($html) === '') {
         return '';
     }
@@ -754,7 +773,7 @@ function sanitize_legal_html(string $html): string {
     if (!$body) {
         return '';
     }
-    sanitize_html_node($body, $allowedTags, $dropEntirely);
+    sanitize_html_node($body, $allowedTags, $dropEntirely, $report);
 
     $out = '';
     foreach (iterator_to_array($body->childNodes) as $child) {
@@ -763,7 +782,7 @@ function sanitize_legal_html(string $html): string {
     return $out;
 }
 
-function sanitize_html_node(DOMNode $node, array $allowedTags, array $dropEntirely): void {
+function sanitize_html_node(DOMNode $node, array $allowedTags, array $dropEntirely, ?array &$report = null): void {
     foreach (iterator_to_array($node->childNodes) as $child) {
         if ($child instanceof DOMText) {
             continue;
@@ -771,16 +790,19 @@ function sanitize_html_node(DOMNode $node, array $allowedTags, array $dropEntire
         if (!($child instanceof DOMElement)) {
             // Comments, processing instructions, doctypes etc. -- never legitimate in saved content.
             $node->removeChild($child);
+            if ($report !== null) { $report['comments_removed']++; }
             continue;
         }
         $tag = strtolower($child->nodeName);
         if (in_array($tag, $dropEntirely, true)) {
+            if ($report !== null) { $report['removed_tags'][$tag] = ($report['removed_tags'][$tag] ?? 0) + 1; }
             $node->removeChild($child);
             continue;
         }
         if (!isset($allowedTags[$tag])) {
             // Unwrap: keep the (sanitized) children, drop just this wrapper tag.
-            sanitize_html_node($child, $allowedTags, $dropEntirely);
+            if ($report !== null) { $report['unwrapped_tags'][$tag] = ($report['unwrapped_tags'][$tag] ?? 0) + 1; }
+            sanitize_html_node($child, $allowedTags, $dropEntirely, $report);
             while ($child->firstChild) {
                 $node->insertBefore($child->firstChild, $child);
             }
@@ -792,18 +814,21 @@ function sanitize_html_node(DOMNode $node, array $allowedTags, array $dropEntire
         foreach (iterator_to_array($child->attributes ?? []) as $attr) {
             $attrName = strtolower($attr->nodeName);
             if (!in_array($attrName, $allowedAttrs, true)) {
+                if ($report !== null) { $k = $tag . '@' . $attrName; $report['removed_attributes'][$k] = ($report['removed_attributes'][$k] ?? 0) + 1; }
                 $child->removeAttribute($attr->nodeName);
                 continue;
             }
             if (in_array($attrName, ['href', 'src'], true) && preg_match('/^\s*(javascript|data|vbscript):/i', $attr->nodeValue)) {
+                if ($report !== null) { $k = $tag . '@' . $attrName . ' (unsafe URL)'; $report['removed_attributes'][$k] = ($report['removed_attributes'][$k] ?? 0) + 1; }
                 $child->removeAttribute($attr->nodeName);
             }
         }
         if ($tag === 'a') {
             $child->setAttribute('rel', 'noopener noreferrer nofollow');
+            if ($report !== null) { $report['links_rel_forced']++; }
         }
 
-        sanitize_html_node($child, $allowedTags, $dropEntirely);
+        sanitize_html_node($child, $allowedTags, $dropEntirely, $report);
     }
 }
 
@@ -2288,6 +2313,167 @@ function restore_translation_version(PDO $db, array $doc, string $lang, int $ver
     ]);
     log_audit((int)$doc['project_id'], $doc['project_name'], t('editor.audit.restored', ['title' => $version['title'], 'lang' => strtoupper($lang), 'note' => $noteRestored]), $actor);
     return true;
+}
+
+/**
+ * Default URL slug for a standard document type in a given language (used when a translation is
+ * created; existing slugs are never touched, public URLs keep working). Unknown types and
+ * languages fall back to the document type's own slug.
+ */
+function default_slug_for_lang(string $docTypeSlug, string $lang): string {
+    static $map = [
+        'en' => [
+            'impressum' => 'imprint', 'datenschutz' => 'privacy-policy', 'agb-b2c' => 'terms-b2c',
+            'agb-b2b' => 'terms-b2b', 'cookie-richtlinie' => 'cookie-policy', 'widerruf' => 'withdrawal',
+        ],
+        'de' => [
+            'imprint' => 'impressum', 'privacy-policy' => 'datenschutz', 'terms-b2c' => 'agb-b2c',
+            'terms-b2b' => 'agb-b2b', 'cookie-policy' => 'cookie-richtlinie', 'withdrawal' => 'widerruf',
+        ],
+    ];
+    return $map[strtolower($lang)][$docTypeSlug] ?? $docTypeSlug;
+}
+
+/**
+ * Cheap typo check for legal HTML: unbalanced tags, brackets and quotes (also when an opening
+ * quote/bracket sits inside an inline element but its closing partner outside). Never blocks
+ * saving; callers show the warnings. Returns a list of human-readable English warnings.
+ */
+function check_html_quality(string $html): array {
+    $warnings = [];
+    if (trim($html) === '') {
+        return $warnings;
+    }
+
+    // 1. Tag balance (libxml reports mismatched/unclosed tags).
+    $prev = libxml_use_internal_errors(true);
+    $dom = new DOMDocument('1.0', 'UTF-8');
+    $dom->loadHTML('<?xml encoding="UTF-8"?><html><body>' . $html . '</body></html>', LIBXML_NOWARNING);
+    foreach (libxml_get_errors() as $err) {
+        $msg = trim($err->message);
+        if (stripos($msg, 'Opening and ending tag mismatch') !== false || stripos($msg, 'Unexpected end tag') !== false) {
+            $warnings[$msg] = 'HTML structure: ' . $msg;
+        }
+    }
+    libxml_clear_errors();
+    libxml_use_internal_errors($prev);
+
+    // 2. Bracket and quote balance over the whole visible text.
+    $text = html_entity_decode(strip_tags(preg_replace('/\{\{[a-z_]+\}\}/', '', $html)), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $pairs = ['(' => ')', '[' => ']', '«' => '»', '“' => '”'];
+    $hasGermanQuotes = mb_strpos($text, '„') !== false;
+    foreach ($pairs as $open => $close) {
+        if ($open === '“' && $hasGermanQuotes) {
+            continue; // „ ... “ style: “ closes, so counting pairs is ambiguous
+        }
+        $o = mb_substr_count($text, $open);
+        $c = mb_substr_count($text, $close);
+        if ($o !== $c) {
+            $warnings[] = "Unbalanced $open $close in text ($o opening, $c closing)";
+        }
+    }
+
+    // 3. Opening bracket/quote inside an inline element, closing partner outside of it.
+    $body = $dom->getElementsByTagName('body')->item(0);
+    if ($body) {
+        foreach (['em', 'i', 'strong', 'b', 'u', 'a', 'span'] as $tag) {
+            foreach ($body->getElementsByTagName($tag) as $el) {
+                $inner = $el->textContent;
+                foreach ($pairs as $open => $close) {
+                    if ($open === '“' && $hasGermanQuotes) {
+                        continue;
+                    }
+                    if (mb_substr_count($inner, $open) !== mb_substr_count($inner, $close)) {
+                        $snippet = mb_substr(trim($inner), 0, 40);
+                        $warnings[] = "<$tag> contains \"$snippet\" with an unmatched $open/$close (quote or bracket partner sits outside the tag)";
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    return array_values(array_unique($warnings));
+}
+
+/**
+ * Stores a proposed change next to the live text. The live version stays untouched until a
+ * human approves it (admin editor). A new proposal replaces an earlier one for the same text.
+ * Returns ['saved' => bool, 'sanitize_report' => array].
+ */
+function propose_translation_change(PDO $db, array $doc, string $lang, array $input, ?string $actor = null): array {
+    $docId = (int)$doc['id'];
+    $report = [];
+    $content = sanitize_legal_html((string)($input['content'] ?? ''), $report);
+    $title = trim((string)($input['title'] ?? ''));
+    $slug = trim((string)($input['slug'] ?? ''));
+    $note = trim((string)($input['change_note'] ?? ''));
+
+    if ($title === '' || trim(strip_tags($content)) === '') {
+        return ['saved' => false, 'error' => 'title and content must not be empty', 'sanitize_report' => $report];
+    }
+    if ($slug !== '') {
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,98}$/', $slug)) {
+            return ['saved' => false, 'error' => 'invalid slug', 'sanitize_report' => $report];
+        }
+        $stmtDup = $db->prepare("SELECT 1 FROM translations t JOIN documents d ON d.id = t.document_id WHERE d.project_id = ? AND t.lang = ? AND t.slug = ? AND d.id != ? LIMIT 1");
+        $stmtDup->execute([(int)$doc['project_id'], $lang, $slug, $docId]);
+        if ($stmtDup->fetchColumn()) {
+            return ['saved' => false, 'error' => 'slug already used by another document in this language', 'sanitize_report' => $report];
+        }
+    }
+
+    $stmtOld = $db->prepare("SELECT title, slug, content FROM translations WHERE document_id = ? AND lang = ?");
+    $stmtOld->execute([$docId, $lang]);
+    $baseHash = translation_state_hash($stmtOld->fetch() ?: null);
+    $by = (string)($actor ?? ($_SESSION['paragrafy_user_name'] ?? 'Admin'));
+
+    $db->prepare("
+        INSERT INTO pending_changes (document_id, lang, title, slug, content, change_note, proposed_by, base_hash, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(document_id, lang) DO UPDATE SET
+        title=excluded.title, slug=excluded.slug, content=excluded.content, change_note=excluded.change_note,
+        proposed_by=excluded.proposed_by, base_hash=excluded.base_hash, created_at=CURRENT_TIMESTAMP
+    ")->execute([$docId, $lang, $title, $slug, $content, $note, $by, $baseHash]);
+
+    log_audit((int)$doc['project_id'], $doc['project_name'], t('editor.audit.proposed', ['title' => $title, 'lang' => strtoupper($lang)]), $by);
+    return ['saved' => true, 'sanitize_report' => $report];
+}
+
+function translation_state_hash(?array $row): string {
+    return $row ? md5(($row['title'] ?? '') . "\n" . ($row['slug'] ?? '') . "\n" . ($row['content'] ?? '')) : md5('');
+}
+
+function get_pending_change(PDO $db, int $docId, string $lang): ?array {
+    $stmt = $db->prepare("SELECT * FROM pending_changes WHERE document_id = ? AND lang = ?");
+    $stmt->execute([$docId, $lang]);
+    return $stmt->fetch() ?: null;
+}
+
+function discard_pending_change(PDO $db, int $docId, string $lang): void {
+    $db->prepare("DELETE FROM pending_changes WHERE document_id = ? AND lang = ?")->execute([$docId, $lang]);
+}
+
+/**
+ * Publishes the pending change through the normal publish path (versioning, webhooks, audit log)
+ * and removes it. The proposal is kept if the save needs confirmation for unfilled placeholders.
+ */
+function approve_pending_change(PDO $db, array $doc, string $lang, bool $confirmUnfilled = false, ?string $actor = null): array {
+    $pending = get_pending_change($db, (int)$doc['id'], $lang);
+    if (!$pending) {
+        return ['saved' => false, 'needs_confirmation' => false, 'unfilled' => [], 'status' => 'published', 'no_pending' => true];
+    }
+    $stmtSch = $db->prepare("SELECT scheduled_at FROM translations WHERE document_id = ? AND lang = ?");
+    $stmtSch->execute([(int)$doc['id'], $lang]);
+    $hadScheduled = !empty($stmtSch->fetchColumn());
+    $result = save_translation_for_document($db, $doc, $lang, [
+        'title' => $pending['title'], 'slug' => $pending['slug'], 'content' => $pending['content'],
+        'status' => 'published', 'change_note' => $pending['change_note'], 'confirm_unfilled' => $confirmUnfilled,
+    ], $actor);
+    if (!empty($result['saved'])) {
+        discard_pending_change($db, (int)$doc['id'], $lang);
+        $result['cancelled_scheduled_change'] = $hadScheduled;
+    }
+    return $result;
 }
 
 /**
